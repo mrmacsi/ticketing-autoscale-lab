@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars. No secrets belong in this file.
+project_id     = "contentpulse-vertex-ai"
+project_number = "210564622269"
+region         = "europe-west2"
+zone           = "europe-west2-b"
+
+initial_instances      = 1
+min_instances          = 1
+max_instances          = 5
+approved_max_instances = 5   # spending ceiling; the dashboard can never exceed it
+
+target_cpu_utilization = 0.60
+vm_machine_type        = "n1-standard-1"
+instance_init_seconds  = 60
+scale_in_stabilization = 240
+
+generator_machine_type = "e2-small"
+db_tier                = "db-custom-1-3840"
+
+allowed_emails = ["thebeezindex@gmail.com"]
+auth_mode      = "iam_proxy"
+
+# Optional budget alert (notification only, not a cap). Amount is in the billing account currency.
+billing_account_id = "XXXXXX-XXXXXX-XXXXXX"
+budget_amount      = 0

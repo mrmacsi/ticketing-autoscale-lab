@@ -1,0 +1,15 @@
+variable "prefix" { type = string }
+variable "project_id" { type = string }
+variable "zone" { type = string }
+variable "subnet_id" { type = string }
+variable "image" { type = string }
+variable "machine_type" { type = string }
+variable "loadgen_tag" { type = string }
+variable "labels" { type = map(string) }
+variable "target_base_url" { type = string }
+variable "allowed_target_host" { type = string }
+variable "firestore_database" { type = string }
+variable "max_rate" { type = number }
+variable "max_vus" { type = number }
+variable "max_duration_seconds" { type = number }
+variable "service_account_email" { type = string }

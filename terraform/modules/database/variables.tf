@@ -1,0 +1,10 @@
+variable "prefix" { type = string }
+variable "project_id" { type = string }
+variable "region" { type = string }
+variable "zone" { type = string }
+variable "tier" { type = string }
+variable "max_connections" { type = number }
+variable "database_name" { type = string }
+variable "network_id" { type = string }
+variable "subnet_id" { type = string }
+variable "labels" { type = map(string) }

@@ -1,0 +1,17 @@
+.DS_Store
+node_modules/
+dist/
+vendor/
+.env
+*.log
+.phpunit.result.cache
+.approved-budget
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+images.auto.tfvars.json
+tfplan
+*.pid
+outputs/
+terraform/environments/autoscaling-lab/terraform.tfvars

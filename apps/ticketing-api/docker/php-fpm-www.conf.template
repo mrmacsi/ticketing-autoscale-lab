@@ -1,0 +1,18 @@
+[global]
+error_log = /proc/self/fd/2
+log_limit = 8192
+
+[www]
+; No per-request access log: at hundreds of requests/s it would only add CPU and logging cost.
+user = www-data
+group = www-data
+listen = 127.0.0.1:9000
+; Static pool: no fork latency when a traffic spike arrives. Each worker holds one DB connection.
+pm = static
+pm.max_children = ${FPM_MAX_CHILDREN}
+pm.max_requests = 5000
+request_terminate_timeout = 40s
+catch_workers_output = yes
+decorate_workers_output = no
+clear_env = no
+env[HOME] = /var/www

@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: var(--color-slate-950);
+    color: var(--color-slate-200);
+    overflow-x: hidden;
+  }
+  body {
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  input,
+  select,
+  textarea,
+  button {
+    font: inherit;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-sky-400);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .input {
+    @apply w-full min-w-0 rounded-md border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-500 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60;
+  }
+  .input-error {
+    @apply border-red-500/70;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium ring-1 ring-inset transition-colors disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-default {
+    @apply bg-slate-800 text-slate-100 ring-slate-600 hover:bg-slate-700;
+  }
+  .btn-primary {
+    @apply bg-sky-600 text-white ring-sky-500 hover:bg-sky-500;
+  }
+  .btn-danger {
+    @apply bg-red-600 text-white ring-red-500 hover:bg-red-500;
+  }
+  .btn-ghost {
+    @apply bg-transparent text-slate-300 ring-transparent hover:bg-slate-800;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium text-slate-400;
+  }
+}
+
+@media print {
+  html,
+  body {
+    background: #fff !important;
+    color: #0f172a !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-dark {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  section {
+    break-inside: avoid;
+  }
+}

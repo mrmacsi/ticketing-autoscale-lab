@@ -1,0 +1,14 @@
+*
+!go.mod
+!go.sum
+!cmd/
+!config/
+!controller/
+!engine/
+!fsstore/
+!internal/
+!metrics/
+!scenarios/
+!ticketapi/
+!queueapi/
+**/*_test.go

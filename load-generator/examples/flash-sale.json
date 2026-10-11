@@ -1,0 +1,20 @@
+{
+  "experimentId": "local_flash_sale",
+  "eventId": "REPLACE_WITH_EVENT_UUID",
+  "seed": 7,
+  "durationSeconds": 30,
+  "maxVUs": 1000,
+  "totalArrivals": 1000,
+  "requestTimeoutMs": 10000,
+  "pattern": {"type": "constant", "rate": 500},
+  "mix": {"browse": 0, "availability": 0, "reserve": 0, "purchase": 100},
+  "behaviour": {
+    "maxQuantity": 4,
+    "thinkTimeMinMs": 0, "thinkTimeMaxMs": 0,
+    "abandonCheckoutProbability": 0,
+    "duplicateSubmitProbability": 0.2,
+    "retryPaymentAfterDeclineProbability": 1,
+    "syntheticCpuMs": 0,
+    "syntheticCpuProbability": 0
+  }
+}

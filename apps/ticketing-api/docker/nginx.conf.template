@@ -1,0 +1,58 @@
+server {
+    listen ${HTTP_PORT} default_server;
+    root /var/www/html/public;
+    index index.php;
+
+    access_log off;
+    error_log /dev/stderr warn;
+    client_max_body_size 64k;
+    keepalive_timeout 620s;   # longer than the load balancer's 600 s backend keep-alive
+
+    location ^~ /api/admin/ {
+        ${ADMIN_ALLOW_RULES}
+        deny all;
+        try_files $uri /index.php?$query_string;
+    }
+
+    # Load signals for the waiting room (VPC only; the load balancer's proxies are not allowed). Served
+    # without the PHP worker pool so they stay fast exactly when the pool is saturated.
+    # nginx's own counters: "Writing" = requests in progress (running in PHP or waiting for a worker).
+    # PHP-FPM's status page was not usable here: through pm.status_listen it reported more busy workers
+    # than exist (24 of 24 with 4 requests on a 16-worker pool).
+    location = /lab/load {
+        ${LOAD_ALLOW_RULES}
+        deny all;
+        stub_status;
+        add_header X-Php-Workers ${FPM_MAX_CHILDREN} always;
+        add_header Cache-Control no-store always;
+    }
+
+    location = /lab/cpu {
+        ${LOAD_ALLOW_RULES}
+        deny all;
+        default_type application/json;
+        add_header Cache-Control no-store always;
+        alias ${LAB_GUEST_CPU_FILE};
+    }
+
+    # Laravel would route /index.php/api/admin/... like /api/admin/...; refuse that path form.
+    location ^~ /index.php/ {
+        return 404;
+    }
+
+    location / {
+        try_files $uri /index.php?$query_string;
+    }
+
+    location = /index.php {
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_read_timeout 35s;
+        fastcgi_keep_conn on;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}

@@ -1,0 +1,9 @@
+variable "prefix" { type = string }
+variable "region" { type = string }
+variable "workloads_cidr" { type = string }
+variable "control_cidr" { type = string }
+variable "app_tag" { type = string }
+variable "loadgen_tag" { type = string }
+variable "app_port" { type = number }
+variable "queue_tag" { type = string }
+variable "queue_port" { type = number }

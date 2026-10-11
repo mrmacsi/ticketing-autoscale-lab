@@ -1,0 +1,23 @@
+{
+  "kind": "compute#backendServiceGroupHealth",
+  "healthStatus": [
+    {
+      "ipAddress": "10.60.0.24",
+      "port": 8080,
+      "instance": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/zones/europe-west2-b/instances/ticketing-scale-lab-app-76td",
+      "healthState": "HEALTHY"
+    },
+    {
+      "ipAddress": "10.60.0.26",
+      "port": 8080,
+      "instance": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/zones/europe-west2-b/instances/ticketing-scale-lab-app-x2rh",
+      "healthState": "HEALTHY"
+    },
+    {
+      "ipAddress": "10.60.0.27",
+      "port": 8080,
+      "instance": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/zones/europe-west2-b/instances/ticketing-scale-lab-app-wcb0",
+      "healthState": "HEALTHY"
+    }
+  ]
+}

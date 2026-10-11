@@ -1,0 +1,30 @@
+{
+  "kind": "compute#backendServiceGroupHealth",
+  "healthStatus": [
+    {
+      "ipAddress": "10.60.0.9",
+      "port": 8080,
+      "instance": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/zones/europe-west2-b/instances/ticketing-scale-lab-app-ab12",
+      "healthState": "HEALTHY",
+      "forwardingRule": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/global/forwardingRules/ticketing-scale-lab-http",
+      "forwardingRuleIp": "34.111.22.33"
+    },
+    {
+      "ipAddress": "10.60.0.12",
+      "port": 8080,
+      "instance": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/zones/europe-west2-b/instances/ticketing-scale-lab-app-cd34",
+      "healthState": "UNHEALTHY",
+      "forwardingRule": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/global/forwardingRules/ticketing-scale-lab-http",
+      "forwardingRuleIp": "34.111.22.33"
+    },
+    {
+      "ipAddress": "10.60.0.7",
+      "port": 8080,
+      "instance": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/zones/europe-west2-b/instances/ticketing-scale-lab-app-0f9e",
+      "healthState": "HEALTHY",
+      "forwardingRule": "https://www.googleapis.com/compute/v1/projects/contentpulse-vertex-ai/global/forwardingRules/ticketing-scale-lab-http",
+      "forwardingRuleIp": "34.111.22.33"
+    }
+  ],
+  "annotations": {}
+}

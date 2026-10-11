@@ -1,0 +1,11 @@
+variable "prefix" { type = string }
+variable "region" { type = string }
+variable "image" { type = string }
+variable "network_id" { type = string }
+variable "subnet_id" { type = string }
+variable "min_instances" { type = number }
+variable "labels" { type = map(string) }
+variable "env" { type = map(string) }
+variable "observer_password_secret_id" { type = string }
+variable "admin_token_secret_id" { type = string }
+variable "service_account_email" { type = string }

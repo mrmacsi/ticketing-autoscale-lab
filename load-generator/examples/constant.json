@@ -1,0 +1,20 @@
+{
+  "experimentId": "local_constant",
+  "eventId": "REPLACE_WITH_EVENT_UUID",
+  "seed": 42,
+  "durationSeconds": 30,
+  "maxVUs": 200,
+  "totalArrivals": 0,
+  "requestTimeoutMs": 10000,
+  "pattern": {"type": "constant", "rate": 20},
+  "mix": {"browse": 40, "availability": 20, "reserve": 25, "purchase": 15},
+  "behaviour": {
+    "maxQuantity": 4,
+    "thinkTimeMinMs": 200, "thinkTimeMaxMs": 1500,
+    "abandonCheckoutProbability": 0.1,
+    "duplicateSubmitProbability": 0.05,
+    "retryPaymentAfterDeclineProbability": 0.5,
+    "syntheticCpuMs": 0,
+    "syntheticCpuProbability": 0
+  }
+}

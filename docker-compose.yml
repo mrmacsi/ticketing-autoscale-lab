@@ -1,0 +1,84 @@
+# Local, cost-free version of the whole lab. Compute Engine telemetry (MIG, autoscaler, Cloud
+# Monitoring CPU) does not exist locally and is reported as unavailable, never simulated.
+name: ticketing-scale-lab
+
+x-lab-secrets: &lab-admin-token local-admin-token-change-me-0123456789
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: local-postgres-password
+    volumes:
+      - ./local/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports: ["55433:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud emulators firestore start --host-port=0.0.0.0:8085 --project=local-lab
+    ports: ["8085:8085"]
+
+  ticketing-api:
+    build: ./apps/ticketing-api
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      APP_KEY: base64:2fl+Ktvkfl+Fuz4Qp/A75G2RTiWVA/ZoKZvp6fiiM10=
+      DB_HOST: postgres
+      DB_DATABASE: ticketing
+      DB_USERNAME: ticketing_app
+      DB_PASSWORD: local-app-password
+      LAB_ADMIN_TOKEN: *lab-admin-token
+      ADMIN_ALLOW_CIDRS: 172.16.0.0/12,192.168.0.0/16
+      LOAD_ALLOW_CIDRS: 127.0.0.1/32,172.16.0.0/12,192.168.0.0/16
+      INSTANCE_NAME: local-app-1
+      FPM_MAX_CHILDREN: "16"
+    ports: ["8080:8080"]
+
+  # Waiting room: locally the single API container is the only "server"; it counts as healthy while
+  # its /health answers 200 (on GCP the load balancer's backend health is used instead).
+  waiting-room:
+    build: ./apps/waiting-room
+    depends_on: [ticketing-api]
+    environment:
+      LAB_ADMIN_TOKEN: *lab-admin-token
+      CAPACITY_SOURCE: static
+      STATIC_BACKENDS: http://ticketing-api:8080
+    ports: ["18082:8080"]
+
+  control-api:
+    build:
+      context: ./apps
+      dockerfile: control-api/Dockerfile
+    depends_on: [ticketing-api, firestore, waiting-room]
+    environment:
+      AUTH_MODE: dev
+      GCP_ENABLED: "false"
+      GCP_PROJECT_ID: local-lab
+      FIRESTORE_EMULATOR_HOST: firestore:8085
+      TICKETING_PUBLIC_URL: http://localhost:8080
+      TICKETING_ADMIN_URL: http://ticketing-api:8080
+      LAB_ADMIN_TOKEN: *lab-admin-token
+      DB_HOST: postgres
+      DB_NAME: ticketing
+      DB_USER: lab_observer
+      DB_PASSWORD: local-observer-password
+      WAITING_ROOM_URL: http://waiting-room:8080
+    ports: ["18081:8080"]
+
+  loadgen:
+    build: ./load-generator
+    command: ["agent"]
+    depends_on: [ticketing-api, firestore, waiting-room]
+    environment:
+      TARGET_BASE_URL: http://ticketing-api:8080
+      QUEUE_BASE_URL: http://waiting-room:8080
+      ALLOWED_TARGET_HOSTS: ticketing-api:8080,waiting-room:8080
+      GOOGLE_CLOUD_PROJECT: local-lab
+      FIRESTORE_EMULATOR_HOST: firestore:8085
+      AGENT_ID: local-loadgen
+      MAX_VUS: "1000000" # customers waiting in the waiting room occupy a VU
