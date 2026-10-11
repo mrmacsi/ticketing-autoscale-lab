@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Event;
 use App\Models\TicketCategory;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\DB;
 
@@ -21,13 +22,18 @@ class EventController extends Controller
         return response()->json(['data' => $this->present(Event::with('categories')->findOrFail($id))]);
     }
 
-    /** Approximate by design: a plain read, no locks, may be stale by the time the user reserves. */
+    /**
+     * Approximate by design: a plain read, no locks, may be stale by the time the user reserves.
+     * The hottest endpoint: one query; the event's existence is only checked when it has no categories.
+     */
     public function availability(string $id): JsonResponse
     {
-        Event::findOrFail($id);
         $rows = DB::select(
             'SELECT id, name, price_cents, capacity, held, GREATEST(capacity - held - sold, 0) AS available
                FROM ticket_categories WHERE event_id = ? ORDER BY price_cents', [$id]);
+        if ($rows === [] && ! Event::whereKey($id)->exists()) {
+            throw (new ModelNotFoundException)->setModel(Event::class, [$id]);
+        }
         $categories = array_map(fn ($r) => [
             'id' => $r->id, 'name' => $r->name, 'price_cents' => (int) $r->price_cents,
             'capacity' => (int) $r->capacity, 'available' => (int) $r->available,

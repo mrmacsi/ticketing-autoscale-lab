@@ -15,13 +15,16 @@ use Symfony\Component\HttpFoundation\Response;
  * lab settings. While `waiting_room_required` is off the header is ignored entirely.
  *
  * The verified event id is left on the request for the controller, which compares it with the
- * event of the requested category (queue_token_wrong_event).
+ * event of the requested category (queue_token_wrong_event), together with the queue id, which the
+ * reservation stores so that one admission pass yields at most one reservation (queue_token_used).
  */
 class RequireQueueToken
 {
     public const HEADER = 'X-Queue-Token';
 
     public const EVENT_ATTRIBUTE = 'queue_token_event_id';
+
+    public const QUEUE_ATTRIBUTE = 'queue_token_queue_id';
 
     public function __construct(
         private readonly LabSettings $settings,
@@ -41,6 +44,7 @@ class RequireQueueToken
 
         $payload = $this->tokens->verify($token);
         $request->attributes->set(self::EVENT_ATTRIBUTE, $payload['e']);
+        $request->attributes->set(self::QUEUE_ATTRIBUTE, $payload['q']);
 
         return $next($request);
     }

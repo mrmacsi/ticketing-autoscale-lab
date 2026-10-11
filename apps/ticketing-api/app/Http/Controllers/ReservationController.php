@@ -33,6 +33,7 @@ class ReservationController extends Controller
 
         [$reservation, $replayed] = $reservations->reserve(
             $input['category_id'], (int) $input['quantity'], $input['customer_ref'], $request->header('Idempotency-Key'),
+            $request->attributes->get(RequireQueueToken::QUEUE_ATTRIBUTE),
         );
 
         return $this->respond(['data' => $reservation->toApi()], $replayed ? 200 : 201, $replayed);

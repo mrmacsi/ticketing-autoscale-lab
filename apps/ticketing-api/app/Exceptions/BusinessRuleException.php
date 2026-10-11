@@ -71,6 +71,11 @@ class BusinessRuleException extends RuntimeException
         return new self('queue_token_wrong_event', 403, 'The X-Queue-Token was issued for a different event.');
     }
 
+    public static function queueTokenUsed(): self
+    {
+        return new self('queue_token_used', 409, 'This waiting-room admission was already used for another reservation. Join the waiting room again.');
+    }
+
     public function render(): JsonResponse
     {
         $body = ['error' => $this->errorCode, 'message' => $this->getMessage()];

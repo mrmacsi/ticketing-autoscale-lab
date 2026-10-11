@@ -20,6 +20,8 @@ return [
         'payment_delay_max_ms' => 10000,
         'reservation_ttl_min_seconds' => 10,
         'reservation_ttl_max_seconds' => 3600,
+        'reservation_ttl_near_sellout_min_seconds' => 5,
+        'near_sellout_threshold_max' => 1000000,
     ],
 
     // A payment that started before expiry may finish this long after expiry; afterwards the
@@ -34,6 +36,11 @@ return [
         'synthetic_cpu_max_ms' => 0,
         // When true, POST /api/reservations requires a valid X-Queue-Token from the waiting room.
         'waiting_room_required' => false,
+        // Shorter hold near sell-out: when > 0, a reservation that leaves at most
+        // near_sellout_threshold tickets of its category for sale expires after this many seconds
+        // (never longer than reservation_ttl_seconds). 0 = off.
+        'reservation_ttl_near_sellout_seconds' => 0,
+        'near_sellout_threshold' => 0,
     ],
 
     'guest_cpu_file' => env('LAB_GUEST_CPU_FILE', '/tmp/guest-cpu.json'),

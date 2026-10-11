@@ -3,7 +3,9 @@
 namespace Tests\Feature;
 
 use App\Exceptions\BusinessRuleException;
+use App\Models\Reservation;
 use App\Models\TicketCategory;
+use App\Services\InventoryAdmin;
 use App\Services\QueueToken;
 use Tests\Support\BuildsEvents;
 use Tests\TestCase;
@@ -202,6 +204,98 @@ class WaitingRoomTokenTest extends TestCase
             ->assertJsonPath('error', 'queue_token_invalid');
     }
 
+    public function test_the_admission_pass_is_stored_on_the_reservation(): void
+    {
+        $category = $this->eventWithCategory(10);
+        $this->settings(['waiting_room_required' => true]);
+
+        $id = $this->reserveWithToken($category, $this->tokenFor($category, null, 'q_stored'))->assertCreated()->json('data.id');
+
+        $this->assertSame('q_stored', Reservation::findOrFail($id)->queue_id);
+    }
+
+    public function test_without_the_waiting_room_no_pass_is_stored_and_reservations_repeat(): void
+    {
+        $category = $this->eventWithCategory(10);
+        $token = $this->tokenFor($category, null, 'q_ignored');
+
+        $this->reserveWithToken($category, $token)->assertCreated();
+        $this->reserveWithToken($category, $token)->assertCreated();
+
+        $this->assertSame(0, Reservation::whereNotNull('queue_id')->count());
+        $this->assertEquals(2, $this->category($category)->held);
+    }
+
+    public function test_a_second_reservation_with_the_same_pass_is_409_used_without_inventory_change(): void
+    {
+        $category = $this->eventWithCategory(10);
+        $this->settings(['waiting_room_required' => true]);
+        $token = $this->tokenFor($category, null, 'q_once');
+
+        $first = $this->reserveWithToken($category, $token, 2, 'wr-pass-first-1')->assertCreated()->json('data.id');
+
+        // A different reservation (new Idempotency-Key, other customer and quantity) with the same pass.
+        $this->postJson('/api/reservations', ['category_id' => $category->id, 'quantity' => 1, 'customer_ref' => 'cust-2'],
+            ['Idempotency-Key' => 'wr-pass-second-1', 'X-Queue-Token' => $token])
+            ->assertStatus(409)
+            ->assertJsonPath('error', 'queue_token_used')
+            ->assertJsonStructure(['error', 'message']);
+
+        $this->assertEquals((object) ['capacity' => 10, 'held' => 2, 'sold' => 0], $this->category($category));
+        $this->assertSame([$first], Reservation::pluck('id')->all());
+        $this->assertNoInvariantViolations($category);
+    }
+
+    public function test_the_same_pass_in_another_category_of_the_event_is_also_409_used(): void
+    {
+        $event = app(InventoryAdmin::class)->createEvent('Two tiers', [
+            ['name' => 'Front', 'price_cents' => 9000, 'capacity' => 5],
+            ['name' => 'Back', 'price_cents' => 3000, 'capacity' => 5],
+        ]);
+        [$front, $back] = [$event->categories->firstWhere('name', 'Front'), $event->categories->firstWhere('name', 'Back')];
+        $this->settings(['waiting_room_required' => true]);
+        $token = $this->tokenFor($front, null, 'q_two_tiers');
+
+        $this->reserveWithToken($front, $token)->assertCreated();
+        $this->reserveWithToken($back, $token)->assertStatus(409)->assertJsonPath('error', 'queue_token_used');
+
+        $this->assertEquals((object) ['capacity' => 5, 'held' => 1, 'sold' => 0], $this->category($front));
+        $this->assertEquals((object) ['capacity' => 5, 'held' => 0, 'sold' => 0], $this->category($back));
+    }
+
+    public function test_replaying_the_original_request_with_the_used_pass_returns_the_original_reservation(): void
+    {
+        $category = $this->eventWithCategory(10);
+        $this->settings(['waiting_room_required' => true]);
+        $token = $this->tokenFor($category, null, 'q_replay');
+
+        $original = $this->reserveWithToken($category, $token, 2, 'wr-pass-replay-1')->assertCreated()->json('data');
+        $this->reserveWithToken($category, $token, 2, 'wr-pass-replay-2')->assertStatus(409);
+
+        $this->reserveWithToken($category, $token, 2, 'wr-pass-replay-1')
+            ->assertOk()
+            ->assertHeader('Idempotent-Replayed', 'true')
+            ->assertJsonPath('data', $original);
+        $this->assertEquals(2, $this->category($category)->held);
+    }
+
+    public function test_a_sold_out_attempt_does_not_use_up_the_pass(): void
+    {
+        $event = app(InventoryAdmin::class)->createEvent('Partly sold out', [
+            ['name' => 'Gone', 'price_cents' => 9000, 'capacity' => 0],
+            ['name' => 'Left', 'price_cents' => 3000, 'capacity' => 5],
+        ]);
+        [$gone, $left] = [$event->categories->firstWhere('name', 'Gone'), $event->categories->firstWhere('name', 'Left')];
+        $this->settings(['waiting_room_required' => true]);
+        $token = $this->tokenFor($gone, null, 'q_retry');
+
+        $this->reserveWithToken($gone, $token)->assertStatus(409)->assertJsonPath('error', 'sold_out');
+        $this->reserveWithToken($left, $token)->assertCreated();
+        $this->reserveWithToken($left, $token)->assertStatus(409)->assertJsonPath('error', 'queue_token_used');
+
+        $this->assertEquals(1, $this->category($left)->held);
+    }
+
     public function test_cross_language_vector(): void
     {
         config(['lab.admin_token' => self::VECTOR_ADMIN_TOKEN]);
@@ -239,9 +333,9 @@ class WaitingRoomTokenTest extends TestCase
         ], ['Idempotency-Key' => $key ?? 'res-'.bin2hex(random_bytes(8)), 'X-Queue-Token' => $token]);
     }
 
-    private function tokenFor(TicketCategory $category, ?int $exp = null): string
+    private function tokenFor(TicketCategory $category, ?int $exp = null, ?string $queueId = null): string
     {
-        return app(QueueToken::class)->sign('q_'.bin2hex(random_bytes(8)), $category->event_id, $exp ?? time() + 600);
+        return app(QueueToken::class)->sign($queueId ?? 'q_'.bin2hex(random_bytes(8)), $category->event_id, $exp ?? time() + 600);
     }
 
     private function signRaw(string $payloadJson, ?string $adminToken = null): string

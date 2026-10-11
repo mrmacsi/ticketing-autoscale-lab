@@ -2,7 +2,8 @@
 
 /**
  * One competing customer in a separate OS process (own PHP runtime, own DB connection).
- * Usage: php race_worker.php <category_id> <customer_ref> <start_at_unix_float> <mode: reserve|purchase>
+ * Usage: php race_worker.php <category_id> <customer_ref> <start_at_unix_float> <mode: reserve|purchase> [queue_id]
+ * With a queue_id every reservation carries that waiting-room admission pass.
  * Prints a JSON line with the outcome.
  */
 
@@ -18,6 +19,7 @@ $app = require __DIR__.'/../../bootstrap/app.php';
 $app->make(Kernel::class)->bootstrap();
 
 [, $categoryId, $customer, $startAt, $mode] = $argv;
+$queueId = $argv[5] ?? null;
 
 // Open the connection before the barrier so all workers hit the row at the same moment.
 DB::select('SELECT 1');
@@ -26,7 +28,7 @@ while (microtime(true) < (float) $startAt) {
 }
 
 try {
-    [$reservation] = app(ReservationService::class)->reserve($categoryId, 1, $customer, "race-{$customer}");
+    [$reservation] = app(ReservationService::class)->reserve($categoryId, 1, $customer, "race-{$customer}", $queueId);
     if ($mode === 'purchase') {
         [$order] = app(OrderService::class)->create($reservation->id, $customer, "race-order-{$customer}");
         app(PaymentService::class)->pay($order->id, "race-pay-{$customer}", 'approve', 0);

@@ -96,4 +96,12 @@ class ReservationTest extends TestCase
             ->assertJsonPath('data.sold_out', false);
         $this->getJson('/api/events')->assertOk()->assertJsonPath('data.0.categories.0.capacity', 5);
     }
+
+    public function test_availability_of_an_unknown_event_is_404(): void
+    {
+        $this->getJson('/api/events/00000000-0000-0000-0000-00000000dead/availability')
+            ->assertNotFound()
+            ->assertJsonPath('error', 'not_found')
+            ->assertJsonPath('message', 'Resource not found.');
+    }
 }

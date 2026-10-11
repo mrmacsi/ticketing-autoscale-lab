@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Reservation;
 use App\Models\Ticket;
 use App\Models\TicketCategory;
 use Tests\Support\BuildsEvents;
@@ -39,8 +40,22 @@ class ConcurrencyTest extends TestCase
         $this->assertNoInvariantViolations($category);
     }
 
+    public function test_concurrent_reservations_with_the_same_admission_pass_produce_exactly_one(): void
+    {
+        $category = $this->eventWithCategory(100);
+
+        // 30 different customers (own Idempotency-Keys) all presenting the same waiting-room pass.
+        $results = $this->race($category, 30, 'reserve', 'q_shared_pass');
+
+        $this->assertSame(['queue_token_used' => 29, 'success' => 1], $results);
+        $this->assertSame(1, Reservation::where('queue_id', 'q_shared_pass')->count());
+        $this->assertSame(1, Reservation::count());
+        $this->assertEquals((object) ['capacity' => 100, 'held' => 1, 'sold' => 0], $this->category($category));
+        $this->assertNoInvariantViolations($category);
+    }
+
     /** @return array<string, int> outcome => count */
-    private function race(TicketCategory $category, int $competitors, string $mode): array
+    private function race(TicketCategory $category, int $competitors, string $mode, ?string $queueId = null): array
     {
         $startAt = microtime(true) + 1.5;
         $env = array_merge(getenv(), $_ENV);
@@ -48,6 +63,9 @@ class ConcurrencyTest extends TestCase
         $outputs = [];
         for ($i = 0; $i < $competitors; $i++) {
             $cmd = [PHP_BINARY, __DIR__.'/../Support/race_worker.php', $category->id, "racer-{$i}", (string) $startAt, $mode];
+            if ($queueId !== null) {
+                $cmd[] = $queueId;
+            }
             $processes[] = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, base_path(), $env);
             $outputs[$i] = $pipes;
         }

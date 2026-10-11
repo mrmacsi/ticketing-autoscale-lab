@@ -12,14 +12,18 @@ use LogicException;
  */
 class InventoryLedger
 {
-    /** @return object{id: string, event_id: string, price_cents: int}|null null when not enough tickets remain */
+    /**
+     * Null when not enough tickets remain; `available` is what is left for sale after this hold.
+     *
+     * @return object{id: string, event_id: string, price_cents: int, available: int}|null
+     */
     public function hold(string $categoryId, int $quantity): ?object
     {
         return DB::selectOne(
             'UPDATE ticket_categories
                 SET held = held + ?, updated_at = now()
               WHERE id = ? AND capacity - held - sold >= ?
-          RETURNING id, event_id, price_cents',
+          RETURNING id, event_id, price_cents, capacity - held - sold AS available',
             [$quantity, $categoryId, $quantity],
         );
     }

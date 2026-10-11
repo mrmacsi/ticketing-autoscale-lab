@@ -27,7 +27,9 @@ COPY --chmod=0755 docker/cpu-sampler.sh /usr/local/bin/cpu-sampler
 ENV APP_ENV=production APP_DEBUG=false LOG_CHANNEL=stderr LOG_LEVEL=warning \
     DB_CONNECTION=pgsql CACHE_STORE=file SESSION_DRIVER=array QUEUE_CONNECTION=sync
 RUN php artisan package:discover --ansi && php artisan route:cache \
-    && chown -R www-data:www-data storage bootstrap/cache
+    && chown -R www-data:www-data storage bootstrap/cache \
+    # A preload that fails would stop PHP-FPM from starting: exercise it here so the build fails instead.
+    && php -d opcache.enable_cli=1 -r 'echo "preloaded classes: ", count(opcache_get_status()["preload_statistics"]["classes"] ?? []), "\n";'
 
 ARG APP_VERSION=dev
 ENV APP_VERSION=${APP_VERSION}
