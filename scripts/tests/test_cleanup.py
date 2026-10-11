@@ -96,6 +96,18 @@ class TransportClassificationTests(unittest.TestCase):
     def test_wrapped_transport_error_is_retryable(self):
         self.assertTrue(transient_error.is_transient_terraform_failure("│ Error: Error reading Service Account\n│ Get https://iam.googleapis.com/: connection reset by peer\n│\n"))
 
+    def test_flaky_tls_verification_is_retryable(self):
+        # Seen on a flaky network: the retry still verifies certificates, it only tries again.
+        self.assertTrue(transient_error.is_transient_terraform_failure('Error: Error updating UrlMap: Put "https://compute.googleapis.com/x": tls: failed to verify certificate: x509: "compute.googleapis.com" certificate is not standards compliant\n'))
+
+    def test_already_exists_after_a_dropped_connection_is_importable(self):
+        out = ("│ Error: Error creating BackendService: googleapi: Error 409: The resource "
+               "'projects/p/global/backendServices/ticketing-scale-lab-queue-backend' already exists, alreadyExists\n│\n"
+               "│   with module.waiting_room[0].google_compute_backend_service.queue,\n│   on ../../modules/waiting-room/main.tf line 128\n╵\n"
+               "│ Error: Error 403: permission denied\n│\n│   with google_service_account.app,\n╵\n")
+        self.assertEqual(transient_error.already_exists(out), [
+            ("module.waiting_room[0].google_compute_backend_service.queue", "projects/p/global/backendServices/ticketing-scale-lab-queue-backend")])
+
     def test_unreachable_ipv6_route_is_retryable_during_planning(self):
         self.assertTrue(transient_error.is_transient_terraform_failure("Error: Get https://compute.googleapis.com/: dial tcp [2a00:1450::5f]:443: connect: no route to host\n"))
 

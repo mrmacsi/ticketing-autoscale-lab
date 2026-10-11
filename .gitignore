@@ -13,5 +13,6 @@ vendor/
 images.auto.tfvars.json
 tfplan
 *.pid
+tfplan.args
 outputs/
 terraform/environments/autoscaling-lab/terraform.tfvars

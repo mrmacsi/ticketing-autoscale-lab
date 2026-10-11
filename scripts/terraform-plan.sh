@@ -14,6 +14,8 @@ terraform fmt -check -recursive "${REPO_ROOT}/terraform" >/dev/null || die "terr
 tf init -input=false >/dev/null
 tf validate
 tf plan -input=false -lock-timeout=60s ${stage_args[@]+"${stage_args[@]}"} -out=tfplan
+# terraform-apply.sh re-plans in the same mode if a transient failure leaves this plan stale.
+printf '%s\n' ${stage_args[@]+"${stage_args[@]}"} > "${TF_DIR}/tfplan.args"
 
 terraform -chdir="$TF_DIR" show -json tfplan | python3 -c '
 import json, sys

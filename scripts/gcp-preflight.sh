@@ -33,15 +33,18 @@ unset token
 log "5. Quotas in ${GCP_REGION}"
 gcloud_safe compute regions describe "$GCP_REGION" --format=json | python3 -c '
 import json, sys
-need = {"CPUS": 6, "N1_CPUS": 5, "E2_CPUS": 2, "INSTANCES": 7, "IN_USE_ADDRESSES": 2, "SSD_TOTAL_GB": 20, "DISKS_TOTAL_GB": 80}
+# 5 × n2-standard-2 app VMs (10 N2 vCPUs), e2-standard-2 generator + 2 × e2-small queue VMs (6 E2 vCPUs).
+need = {"CPUS": 16, "N2_CPUS": 10, "E2_CPUS": 6, "INSTANCES": 8, "IN_USE_ADDRESSES": 2, "SSD_TOTAL_GB": 20, "DISKS_TOTAL_GB": 100}
 for q in json.load(sys.stdin)["quotas"]:
     if q["metric"] in need:
         m, used, limit = q["metric"], q["usage"], q["limit"]
         verdict = "ok" if limit - used >= need[m] else "INSUFFICIENT"
         print("   %-18s usage %5.0f / %6.0f   need %3d   %s" % (m, used, limit, need[m], verdict))'
 
-log "6. n1-standard-1 in ${GCP_ZONE}"
-gcloud_safe compute machine-types describe n1-standard-1 --zone="$GCP_ZONE" --format='value(name,guestCpus,memoryMb)'
+log "6. Machine types in ${GCP_ZONE}"
+for t in n2-standard-2 e2-standard-2 e2-small; do
+    gcloud_safe compute machine-types describe "$t" --zone="$GCP_ZONE" --format='value(name,guestCpus,memoryMb)'
+done
 
 log "7. Name conflicts with prefix ${PREFIX}"
 conflicts="$(gcloud_safe compute instances list --filter="name~^${PREFIX}" --format='value(name)' 2>/dev/null; \
@@ -53,5 +56,5 @@ else
     echo "   none"
 fi
 
-log "8. Cost estimate: see docs/cost-and-cleanup.md (idle ≈ \$0.29/h, peak with 5 VMs ≈ \$0.54/h)"
+log "8. Cost estimate: see docs/cost-and-cleanup.md (idle ≈ \$0.50/h, peak with 5 app VMs ≈ \$0.96/h)"
 [ "$fail" -eq 0 ] && log "Preflight passed" || die "Preflight found blockers (see above)"
