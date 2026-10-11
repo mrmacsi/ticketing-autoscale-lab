@@ -1,3 +1,5 @@
+# Written in the form the Monitoring API returns (targetAxis set, zero xPos/yPos omitted); anything
+# else shows up as an in-place change on every plan.
 resource "google_monitoring_dashboard" "lab" {
   count = var.enable_workloads ? 1 : 0
   dashboard_json = jsonencode({
@@ -5,29 +7,33 @@ resource "google_monitoring_dashboard" "lab" {
     mosaicLayout = {
       columns = 12
       tiles = [
-        { xPos = 0, yPos = 0, width = 6, height = 4, widget = { title = "Application VM CPU utilisation", xyChart = { dataSets = [{
-          plotType = "LINE"
+        { width = 6, height = 4, widget = { title = "Application VM CPU utilisation", xyChart = { dataSets = [{
+          plotType   = "LINE"
+          targetAxis = "Y1"
           timeSeriesQuery = { timeSeriesFilter = {
             filter      = "metric.type=\"compute.googleapis.com/instance/cpu/utilization\" AND metadata.user_labels.\"lab-role\"=\"app\""
             aggregation = { alignmentPeriod = "60s", perSeriesAligner = "ALIGN_MEAN" }
           } }
         }], thresholds = [{ value = var.target_cpu_utilization, label = "autoscaler target" }] } } },
-        { xPos = 6, yPos = 0, width = 6, height = 4, widget = { title = "Load balancer requests/s by response class", xyChart = { dataSets = [{
-          plotType = "STACKED_AREA"
+        { xPos = 6, width = 6, height = 4, widget = { title = "Load balancer requests/s by response class", xyChart = { dataSets = [{
+          plotType   = "STACKED_AREA"
+          targetAxis = "Y1"
           timeSeriesQuery = { timeSeriesFilter = {
             filter      = "metric.type=\"loadbalancing.googleapis.com/https/request_count\" AND resource.label.\"forwarding_rule_name\"=\"${var.prefix}-http\""
             aggregation = { alignmentPeriod = "60s", perSeriesAligner = "ALIGN_RATE", crossSeriesReducer = "REDUCE_SUM", groupByFields = ["metric.label.\"response_code_class\""] }
           } }
         }] } } },
-        { xPos = 0, yPos = 4, width = 6, height = 4, widget = { title = "Load balancer latency p95 (ms)", xyChart = { dataSets = [{
-          plotType = "LINE"
+        { yPos = 4, width = 6, height = 4, widget = { title = "Load balancer latency p95 (ms)", xyChart = { dataSets = [{
+          plotType   = "LINE"
+          targetAxis = "Y1"
           timeSeriesQuery = { timeSeriesFilter = {
             filter      = "metric.type=\"loadbalancing.googleapis.com/https/total_latencies\" AND resource.label.\"forwarding_rule_name\"=\"${var.prefix}-http\""
             aggregation = { alignmentPeriod = "60s", perSeriesAligner = "ALIGN_PERCENTILE_95", crossSeriesReducer = "REDUCE_MEAN" }
           } }
         }] } } },
         { xPos = 6, yPos = 4, width = 6, height = 4, widget = { title = "Cloud SQL CPU utilisation", xyChart = { dataSets = [{
-          plotType = "LINE"
+          plotType   = "LINE"
+          targetAxis = "Y1"
           timeSeriesQuery = { timeSeriesFilter = {
             filter      = "metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\" AND resource.label.\"database_id\"=\"${var.project_id}:${module.database.instance_name}\""
             aggregation = { alignmentPeriod = "60s", perSeriesAligner = "ALIGN_MEAN" }

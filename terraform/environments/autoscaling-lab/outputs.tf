@@ -21,11 +21,14 @@ output "autoscaler_name" {
 }
 
 output "waiting_room" {
-  description = "Waiting-room VM and its private admin URL (null when not deployed)."
+  description = "Waiting-room instance group, store and private admin URL (null when not deployed)."
   value = local.waiting_room ? {
-    instance    = module.waiting_room[0].instance_name
-    private_url = module.waiting_room[0].private_url
-    public_path = "${module.load_balancer[0].url}/queue/"
+    mig            = module.waiting_room[0].mig_name
+    replicas       = module.waiting_room[0].replicas
+    store          = module.waiting_room[0].store
+    redis_instance = module.waiting_room[0].redis_instance
+    private_url    = module.waiting_room[0].private_url
+    public_path    = "${module.load_balancer[0].url}/queue/"
   } : null
 }
 

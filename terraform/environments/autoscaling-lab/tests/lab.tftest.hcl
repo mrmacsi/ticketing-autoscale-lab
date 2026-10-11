@@ -59,8 +59,66 @@ run "waiting_room_sits_behind_the_load_balancer_without_public_ip" {
     error_message = "waiting room must be deployed when its image is set"
   }
   assert {
-    condition     = length(module.waiting_room[0].instance_name) > 0 && output.waiting_room != null
+    condition     = module.waiting_room[0].mig_name == "ticketing-scale-lab-queue-mig" && output.waiting_room != null
     error_message = "waiting room output missing"
+  }
+}
+
+run "waiting_room_is_highly_available_by_default" {
+  command = apply
+
+  assert {
+    condition     = module.waiting_room[0].store == "redis" && module.waiting_room[0].summary.replicas == 2
+    error_message = "default waiting room must be 2 queue VMs on the redis store"
+  }
+  assert {
+    condition     = module.waiting_room[0].summary.max_surge == 1 && module.waiting_room[0].summary.max_unavailable == 0
+    error_message = "rolling updates must add a VM before removing one"
+  }
+  assert {
+    condition     = module.waiting_room[0].summary.autohealing_path == "/queue/health"
+    error_message = "autohealing must check /queue/health"
+  }
+  assert {
+    condition = (module.waiting_room[0].summary.redis_tier == "BASIC" && module.waiting_room[0].summary.redis_memory_gb == 1
+    && module.waiting_room[0].summary.redis_connect_mode == "DIRECT_PEERING" && module.waiting_room[0].summary.redis_eviction == "noeviction")
+    error_message = "Memorystore must be BASIC 1 GB, direct peering, no eviction"
+  }
+  assert {
+    condition     = module.waiting_room[0].summary.env_store == "redis" && module.waiting_room[0].summary.env_has_redis_addr
+    error_message = "queue VMs must get STORE=redis and REDIS_ADDR"
+  }
+  assert {
+    condition     = module.waiting_room[0].summary.template_has_image && !module.waiting_room[0].summary.template_has_watcher
+    error_message = "the image must come from the instance template (no metadata image watcher)"
+  }
+  assert {
+    condition     = module.waiting_room[0].summary.public_balancing_mode == "RATE" && module.waiting_room[0].summary.admin_scheme == "INTERNAL"
+    error_message = "public backend must use RATE (shared with the internal admin load balancer)"
+  }
+  assert {
+    condition     = output.waiting_room.private_url == "http://${module.waiting_room[0].private_ip}:8080" && output.waiting_room.redis_instance == "ticketing-scale-lab-queue-redis"
+    error_message = "control plane must reach /admin/* on the internal load balancer's fixed IP"
+  }
+  assert {
+    condition     = contains(keys(google_project_service.apis), "redis.googleapis.com")
+    error_message = "redis.googleapis.com must be enabled for Memorystore"
+  }
+}
+
+run "waiting_room_memory_fallback_is_one_vm_without_redis" {
+  command = plan
+  variables {
+    waiting_room_store = "memory"
+    queue_replicas     = 3
+  }
+  assert {
+    condition     = module.waiting_room[0].replicas == 1 && module.waiting_room[0].redis_instance == null
+    error_message = "memory store must run exactly one VM and no Memorystore"
+  }
+  assert {
+    condition     = !contains(keys(google_project_service.apis), "redis.googleapis.com")
+    error_message = "redis API must not be enabled without the redis store"
   }
 }
 

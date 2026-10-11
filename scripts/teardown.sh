@@ -8,7 +8,16 @@ source "$(dirname "$0")/cleanup-lib.sh"
 # APIs that were NOT enabled in the project before the lab (recorded by the first preflight).
 # Core APIs that already existed (compute, logging, monitoring, datastore, …) are left alone, and so
 # are iam / cloudresourcemanager, which gcloud itself needs to manage the project.
-LAB_APIS="sqladmin.googleapis.com run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com firestore.googleapis.com iap.googleapis.com billingbudgets.googleapis.com"
+LAB_APIS="sqladmin.googleapis.com run.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com firestore.googleapis.com iap.googleapis.com billingbudgets.googleapis.com redis.googleapis.com"
+
+# Memorystore instances of the waiting room. With the Redis API off none can exist (and listing would
+# fail), so report none; a failed API call is still a failed verification.
+redis_instances() {
+    local enabled
+    enabled="$(gcloud_safe services list --enabled --filter="config.name=redis.googleapis.com" --format='value(config.name)')" || return 1
+    [ -n "$enabled" ] || return 0
+    gcloud_safe redis instances list --region="$GCP_REGION" --filter="name~/instances/${PREFIX}" --format='value(name)'
+}
 
 step() { printf '\n\033[1;35m### %s\033[0m\n' "$*"; }
 
@@ -45,6 +54,7 @@ check "subnets"               gcloud_safe compute networks subnets list --filter
 check "Cloud Run internal IPs" gcloud_safe compute addresses list --filter="subnetwork~/${PREFIX}-" --format='value(name)'
 check "disks"                 gcloud_safe compute disks list --filter="$f" --format='value(name)'
 check "Cloud SQL"             gcloud_safe sql instances list --filter="$f" --format='value(name)'
+check "Memorystore Redis"     redis_instances
 check "Cloud Run"             gcloud_safe run services list --region="$GCP_REGION" --filter="metadata.name~^${PREFIX}" --format='value(metadata.name)'
 check "Artifact Registry"     gcloud_safe artifacts repositories list --location="$GCP_REGION" --filter="name~${PREFIX}" --format='value(name)'
 check "secrets"               gcloud_safe secrets list --filter="name~${PREFIX}" --format='value(name)'

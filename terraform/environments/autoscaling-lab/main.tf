@@ -34,7 +34,9 @@ resource "google_project_service" "apis" {
     "iam.googleapis.com",
     "iap.googleapis.com",
     "cloudresourcemanager.googleapis.com",
-  ], var.billing_account_id != "" ? ["billingbudgets.googleapis.com"] : []))
+    ], var.billing_account_id != "" ? ["billingbudgets.googleapis.com"] : [],
+    # Memorystore for the highly available waiting room (only when it uses the redis store).
+  local.waiting_room && var.waiting_room_store == "redis" ? ["redis.googleapis.com"] : []))
   service = each.value
   # Never disable shared project APIs on destroy; other workloads in the project may use them.
   disable_on_destroy = false
@@ -185,6 +187,11 @@ module "waiting_room" {
   region                   = var.region
   zone                     = var.zone
   subnet_id                = module.networking.workloads_subnet_id
+  network_id               = module.networking.network_id
+  store                    = var.waiting_room_store
+  replicas                 = var.queue_replicas
+  redis_tier               = var.redis_tier
+  redis_memory_gb          = var.redis_memory_gb
   image                    = var.queue_image
   machine_type             = var.queue_machine_type
   queue_tag                = local.queue_tag
@@ -196,7 +203,7 @@ module "waiting_room" {
   app_instance_group       = module.application[0].instance_group
   service_account_email    = google_service_account.queue.email
   log_sample_rate          = var.lb_log_sample_rate
-  depends_on               = [google_project_iam_member.queue, google_secret_manager_secret_version.lab]
+  depends_on               = [google_project_service.apis, google_project_iam_member.queue, google_secret_manager_secret_version.lab]
 }
 
 module "load_generator" {

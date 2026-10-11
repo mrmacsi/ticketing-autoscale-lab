@@ -10,11 +10,11 @@ max_instances          = 5
 approved_max_instances = 5   # spending ceiling; the dashboard can never exceed it
 
 target_cpu_utilization = 0.60
-vm_machine_type        = "n1-standard-1"
+vm_machine_type        = "n2-standard-2"
 instance_init_seconds  = 60
 scale_in_stabilization = 240
 
-generator_machine_type = "e2-small"
+generator_machine_type = "e2-standard-2"
 db_tier                = "db-custom-1-3840"
 
 allowed_emails = ["thebeezindex@gmail.com"]

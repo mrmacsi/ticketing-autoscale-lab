@@ -61,7 +61,7 @@ variable "queue_image" {
 
 variable "vm_machine_type" {
   type    = string
-  default = "n1-standard-1"
+  default = "n2-standard-2"
 }
 
 variable "initial_instances" {
@@ -101,7 +101,7 @@ variable "instance_init_seconds" {
 
 variable "scale_in_stabilization" {
   type        = number
-  default     = 240
+  default     = 60
   description = "Autoscaler stabilization period (seconds) before scale-in decisions."
 }
 
@@ -132,7 +132,7 @@ variable "db_max_connections" {
 
 variable "generator_machine_type" {
   type    = string
-  default = "e2-small"
+  default = "e2-standard-2"
 }
 
 variable "generator_max_rate" {
@@ -208,4 +208,31 @@ variable "queue_machine_type" {
 variable "queue_port" {
   type    = number
   default = 8080
+}
+
+variable "waiting_room_store" {
+  type        = string
+  default     = "redis"
+  description = "redis: queue_replicas waiting-room VMs share Memorystore for Redis (highly available). memory: one VM, line in memory (no Memorystore)."
+  validation {
+    condition     = contains(["redis", "memory"], var.waiting_room_store)
+    error_message = "waiting_room_store must be redis or memory."
+  }
+}
+
+variable "queue_replicas" {
+  type        = number
+  default     = 2
+  description = "Waiting-room VMs with the redis store (the memory store always runs one)."
+}
+
+variable "redis_tier" {
+  type        = string
+  default     = "BASIC"
+  description = "Memorystore tier for the waiting room: BASIC (no replica) or STANDARD_HA."
+}
+
+variable "redis_memory_gb" {
+  type    = number
+  default = 1
 }
