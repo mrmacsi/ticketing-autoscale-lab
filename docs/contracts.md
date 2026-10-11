@@ -35,7 +35,7 @@ Error body shape: `{"error": "<code>", "message": "<human text>"}`.
 | `GET /api/events` | latest 20 events with categories | 200 `{data:[Event]}` | |
 | `GET /api/events/{id}` | | 200 `{data:Event}` | 404 |
 | `GET /api/events/{id}/availability` | approximate (read committed snapshot) | 200 `{data:{event_id, sold_out, categories:[{id,name,price_cents,capacity,available,held}], as_of}}` (`held` = tickets in other customers' checkouts, which may come back on sale) | 404 |
-| `POST /api/reservations` | header `Idempotency-Key` required; body `{category_id, quantity (1..8), customer_ref}`. While the setting `waiting_room_required` is true, header `X-Queue-Token` (waiting-room admission token, [waiting-room.md §3.2](waiting-room.md)) is also required and is checked **before** the Idempotency-Key and its replay (a replayed key still needs a valid token); while false the header is ignored | 201 `{data:Reservation}` (200 on replay) | 409 `sold_out` / `insufficient_inventory`; 422 `idempotency_key_reused`; 403 `queue_token_required` (header missing) / `queue_token_invalid` (bad format or signature) / `queue_token_expired` (`exp` < now) / `queue_token_wrong_event` (token `e` ≠ event of `category_id`; no inventory change) |
+| `POST /api/reservations` | header `Idempotency-Key` required; body `{category_id, quantity (1..8), customer_ref}`. While the setting `waiting_room_required` is true, header `X-Queue-Token` (waiting-room admission token, [waiting-room.md §3.2](waiting-room.md)) is also required and is checked **before** the Idempotency-Key and its replay (a replayed key still needs a valid token); while false the header is ignored. **One admission pass = one reservation**: while the waiting room is in force the token's queue id `q` is stored on the reservation (unique, in the same transaction as the inventory hold), so a second, different reservation with the same pass is rejected even when both arrive at once; replaying the original Idempotency-Key still returns the original reservation. A rejected attempt (e.g. `sold_out`) does not use the pass up. `expires_at` is `now + reservation_ttl_seconds`, or `now + reservation_ttl_near_sellout_seconds` when that setting is > 0 and the category has at most `near_sellout_threshold` tickets left for sale after this hold | 201 `{data:Reservation}` (200 on replay) | 409 `sold_out` / `insufficient_inventory`; 409 `queue_token_used` (this pass already produced another reservation; no inventory change; join the queue again); 422 `idempotency_key_reused`; 403 `queue_token_required` (header missing) / `queue_token_invalid` (bad format or signature) / `queue_token_expired` (`exp` < now) / `queue_token_wrong_event` (token `e` ≠ event of `category_id`; no inventory change) |
 | `GET /api/reservations/{id}` | | 200 | 404 |
 | `POST /api/orders` | header `Idempotency-Key`; body `{reservation_id, customer_ref}`; one order per reservation | 201 `{data:Order}` (200 on replay or when the order for the reservation already exists) | 409 `reservation_not_active`; 410 `reservation_expired` |
 | `POST /api/orders/{id}/simulate-payment` | header `Idempotency-Key`; body optional `{outcome: "approve"|"decline", delay_ms}` (forced outcome only honoured when lab fault injection is enabled) | 200 `{data:Order}` with status `paid` and tickets | 402 `payment_declined` (`data` = order, retry allowed with a new key); 410 `reservation_expired`; 409 `payment_in_progress` |
@@ -65,9 +65,9 @@ Reachable only from inside the VPC (nginx denies the load balancer's proxy range
 
 | Method & path | Body | Result |
 |---|---|---|
-| `POST /api/admin/experiments/prepare` | `{event_name, categories:[{name, price_cents, capacity}], settings:{reservation_ttl_seconds, payment_delay_min_ms, payment_delay_max_ms, payment_failure_probability, synthetic_cpu_max_ms, waiting_room_required}}` (every settings key optional) | 201 `{data:{event, settings}}` |
+| `POST /api/admin/experiments/prepare` | `{event_name, categories:[{name, price_cents, capacity}], settings:{reservation_ttl_seconds, payment_delay_min_ms, payment_delay_max_ms, payment_failure_probability, synthetic_cpu_max_ms, waiting_room_required, reservation_ttl_near_sellout_seconds, near_sellout_threshold}}` (every settings key optional; same validation as `PUT /api/admin/settings`, applied before the event is created) | 201 `{data:{event, settings}}`; 422 `validation_failed` |
 | `POST /api/admin/events/{id}/reset-inventory` | – | 200 `{data:{event_id, released_reservations, deleted_orders, deleted_tickets}}` |
-| `GET /api/admin/settings` / `PUT /api/admin/settings` | settings object (partial on PUT): `reservation_ttl_seconds`, `payment_delay_min_ms`, `payment_delay_max_ms`, `payment_failure_probability`, `synthetic_cpu_max_ms`, `waiting_room_required` (boolean, default `false`; gates `POST /api/reservations` on `X-Queue-Token`). Every instance picks up a change within ~2 s (settings cache) | 200 `{data: settings}`; 422 `validation_failed` |
+| `GET /api/admin/settings` / `PUT /api/admin/settings` | settings object (partial on PUT): `reservation_ttl_seconds`, `payment_delay_min_ms`, `payment_delay_max_ms`, `payment_failure_probability`, `synthetic_cpu_max_ms`, `waiting_room_required` (boolean, default `false`; gates `POST /api/reservations` on `X-Queue-Token`), `reservation_ttl_near_sellout_seconds` (integer, `0` = off (default) or 5..3600; shorter hold for reservations that leave at most `near_sellout_threshold` tickets of their category for sale; never longer than `reservation_ttl_seconds`), `near_sellout_threshold` (integer tickets 0..1,000,000, default `0`, i.e. only the hold that takes the last tickets). Every instance picks up a change within ~2 s (settings cache) | 200 `{data: settings}`; 422 `validation_failed` |
 | `GET /api/admin/events/{id}/invariants` | – | 200 `{data:{violations:[...], checked_at}}` |
 
 ---
@@ -232,7 +232,7 @@ Authentication: every `/api/*` route requires a verified Google identity in the 
 | `POST /api/experiments` | create + prepare; body `ExperimentConfig`; 409 if another experiment is active; 428 `confirmation_required` if expensive and `confirmExpensive` is not true |
 | `POST /api/experiments/{id}/start` | only from `ready` |
 | `POST /api/experiments/{id}/stop` | hard stop traffic (`running` → `stopping` → `cooling_down`) |
-| `POST /api/experiments/{id}/complete` | end the cool-down observation → `completed`, builds report |
+| `POST /api/experiments/{id}/complete` | end the cool-down observation → `completed`, builds report (the scale-in that follows is still observed, see below) |
 | `POST /api/experiments/{id}/reset-inventory` | rejected (409) while `running`/`stopping` |
 | `POST /api/reset` | abort/forget current experiment, restore autoscaler baseline, → `idle` |
 | `GET /api/experiments` | history list |
@@ -249,7 +249,8 @@ Authentication: every `/api/*` route requires a verified Google identity in the 
   "preset": "B" | null,
   "servers": {"initial": 1, "min": 1, "max": 5, "cpuTarget": 0.6, "initPeriodSeconds": 60, "scaleInWindowSeconds": 240},
   "tickets": {"eventName": "Lab Arena Night", "totalInventory": 100000, "categoryCount": 3, "pricesCents": [4500, 8000, 15000],
-              "reservationTtlSeconds": 120, "paymentDelayMinMs": 100, "paymentDelayMaxMs": 400, "paymentFailureProbability": 0.05},
+              "reservationTtlSeconds": 120, "paymentDelayMinMs": 100, "paymentDelayMaxMs": 400, "paymentFailureProbability": 0.05,
+              "nearSelloutTtlSeconds": 0, "nearSelloutThreshold": 0},
   "traffic": TrafficConfig without experimentId/eventId/waitingRoom,
   "syntheticCpuMaxMs": 0,
   "cooldownObserveSeconds": 900,
@@ -258,6 +259,13 @@ Authentication: every `/api/*` route requires a verified Google identity in the 
   "confirmExpensive": false
 }
 ```
+
+`tickets.nearSelloutTtlSeconds` / `tickets.nearSelloutThreshold` (optional, default 0 = off, so configs stored before
+them still parse): shorter holds for the last N tickets, so abandoned checkouts near the end return them faster. Ranges:
+TTL 0 or 5–3600 and, when > 0, ≤ `reservationTtlSeconds` (422 `tickets.nearSelloutTtlSeconds` otherwise); threshold
+0–1,000,000 tickets. **Prepare** always sends both in the lab settings of `POST /api/admin/experiments/prepare` as
+`reservation_ttl_near_sellout_seconds` and `near_sellout_threshold` (0 included, so a previous experiment's value never
+carries over). Presets A–E: off; preset F: 10 s for the last 200 tickets.
 
 `waitingRoom` (docs/waiting-room.md 3.7) is optional on input and defaults to the value shown (`mode: "fixed"`), so
 experiments stored before it existed still parse; `mode` (default `fixed`) and `maxUsersPerServer` (default 200) are
@@ -284,6 +292,21 @@ Waiting-room lifecycle (best effort where noted; the queue is reached on `WAITIN
 * **Complete, reset and failure** send `PUT /admin/config` with `enabled: false` (eventId of the experiment when known) and
   `PUT /api/admin/settings {"waiting_room_required": false}`; failures are logged and recorded on the timeline but never
   block the cleanup.
+
+Scale-in after completion (`report.measured.scaleIn`):
+
+* At completion the report is built as before, with `measured.scaleIn` decided right away when it already is:
+  `unavailable` (no Compute API / never observed), `not_needed` (the group never had more than `servers.min` VMs), or
+  `complete` (already back at `servers.min` — `completedAt` is the first of the trailing recorded scaling points at the
+  minimum). Otherwise it is `null` and the control plane keeps watching the instance group (the collector's MIG
+  observations, every `POLL_MIG_MS`) for at most 15 min until target size and VM count are ≤ `servers.min` with no VM
+  being deleted. Meanwhile scaling points and the detector's `scaling` / `instance` / `health` events are still recorded
+  for the completed experiment (events carry `data.afterCompletion: true`, attribution as usual); the autoscaler baseline
+  is restored at completion as before, so the scale-in runs with the baseline's stabilization period.
+* When the watch ends a `scaling` event `Scale-in after completion: …` is added and the stored report is updated in place:
+  `measured.scaleIn` is set and `scalingTimeline` re-read from the timeline (the rest of the report is unchanged).
+  Outcomes: `complete`, `timed_out` (15 min), `superseded` (a new experiment was created or the lab was reset first;
+  `note` says which). A control-plane restart ends the watch; the latest report is then marked `unavailable` with a note.
 
 ### SSE `/api/stream`
 
@@ -430,13 +453,17 @@ Experiment states: `idle | preparing | ready | running | stopping | cooling_down
   reports `guest_cpu.percent` (0..100); the control API divides by 100.
 * **422 `details`** is a map of dotted config path → message, e.g. `{"servers.max": "Number must be less than or equal to 5"}`.
 * **`GET /api/experiments`** returns rows `{id, name, preset, state, createdAt, trafficStartedAt, trafficStoppedAt,
-  durationSeconds, peakRps, maxServers, ticketsSold, invariantViolations}` (report values are `null` until completed).
+  completedAt, durationSeconds, peakRps, maxServers, ticketsSold, invariantViolations, minServers, scaleIn}` (report values
+  are `null` until completed; `scaleIn` stays `null` while the scale-in after completion is still observed; `minServers` =
+  `config.servers.min`).
 * **`GET /api/experiments/{id}/export.csv?kind=timeseries|events`** — per-second time series (default) or the timeline.
   The time series ends with `queue_waiting, queue_active, queue_capacity, queue_admission_rate_per_s, queue_healthy_servers`
   (latest queue-server observation at that second) and `queue_joined, queue_admitted, queue_sold_out, queue_wait_p95_ms`
   (generator bucket), then `queue_limit_avg, queue_limit_min, queue_limit_max` (learned per-server limits across the
   healthy servers, adaptive mode only); cells are empty when not measured.
-* The cost model's per-application-VM row has a `unit` containing `instance`; the dashboard multiplies it by the live VM count.
+* The cost model's application-VM row has `perAppServer: true` (every other row `false`); the dashboard multiplies only
+  that row by the live VM count. Older control APIs send no flag; the dashboard then treats the row whose unit starts with
+  `instance-hour (VM` as the per-VM row.
 * Generator accounting details (attribution seconds, `totalArrivals` counting scheduled arrivals, etc.) are listed in
   `load-generator/README.md`.
 
@@ -460,11 +487,22 @@ interface Meta {
   presets: Array<{ id: 'A'|'B'|'C'|'D'|'E'|'F'; title: string; description: string; demonstrates: string; config: ExperimentConfig }>;
   target: { baseUrl: string; migName: string; zone: string; autoscalerName: string; region: string; projectId: string };
   costModel: { currency: 'USD'; rows: Array<{ resource: string; unit: string; unitCostPerHour: number; quantity: number;
-               perHour: number; billedWhileIdle: boolean; note: string }>; idlePerHour: number; peakPerHour: number; notes: string[] };
+               perHour: number; billedWhileIdle: boolean; note: string; perAppServer: boolean }>;
+               idlePerHour: number; peakPerHour: number; notes: string[] };   // list-price ESTIMATES, see below
   links: Record<string, string>;   // Cloud Console / Monitoring deep links
   waitingRoom: { deployed: boolean };   // WAITING_ROOM_URL is set; otherwise waitingRoom.enabled is refused
 }
 ```
+
+Cost model rows (europe-west2 on-demand list-price estimates, USD/h, each overridable): application VMs
+`APP_MACHINE_TYPE` (default `n2-standard-2`, `PRICE_APP_VM_PER_HOUR` 0.113 + `PRICE_APP_DISK_PER_HOUR` 0.0022) × live VMs;
+Cloud SQL (`PRICE_CLOUD_SQL_PER_HOUR` 0.084); load balancer (`PRICE_LB_RULE_PER_HOUR` 0.03 + `PRICE_LB_IP_PER_HOUR` 0.005);
+load-generator VM `GENERATOR_MACHINE_TYPE` (default `e2-standard-2`, `PRICE_GENERATOR_VM_PER_HOUR` 0.078 +
+`PRICE_EXTERNAL_IP_PER_HOUR` 0.005); Cloud Run (`PRICE_CLOUD_RUN_PER_HOUR` 0.068); and, only when the waiting room is
+deployed (`WAITING_ROOM_URL` set), `PRICE_QUEUE_VMS` (default 2) waiting-room queue VMs `QUEUE_MACHINE_TYPE` (default
+`e2-small`, `PRICE_QUEUE_VM_PER_HOUR` 0.0195 each) and Memorystore Redis basic 1 GB (`PRICE_REDIS_PER_HOUR` 0.058); plus
+`PRICE_MISC_PER_HOUR` 0.01. `idlePerHour` counts the baseline minimum of application VMs; the report's
+`estimated.infrastructureCostUsd` uses the same rows.
 
 ### Report (`GET /api/experiments/{id}/report`)
 
@@ -500,6 +538,11 @@ interface Report {
                    // with the peak capacity
                    adaptive: { perServer: Array<{ name: string; finalLimit: number; peakLimit: number; decreases: number }>;
                                limitAvgAtPeakCapacity: number | null; decreasesTotal: number } | null } | null;
+    // Scale-in after traffic stopped (section 3, "Scale-in after completion"); null while still observed, absent in older
+    // reports. completedAt / secondsAfterTrafficStopped only for 'complete'; serversRemoved = highest − last observed count.
+    scaleIn?: { status: 'complete' | 'timed_out' | 'not_needed' | 'unavailable' | 'superseded';
+                completedAt: string | null; secondsAfterTrafficStopped: number | null; serversRemoved: number | null;
+                observedUntil: string; targetServers: number; note?: string } | null;
   };
   configured: { cpuTarget: number; minReplicas: number; maxReplicas: number; initialServers: number; pattern: string; durationSeconds: number };
   estimated: { infrastructureCostUsd: number; note: string };

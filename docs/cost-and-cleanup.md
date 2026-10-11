@@ -6,15 +6,18 @@ All figures are **estimates** from public list prices for `europe-west2` (USD, n
 
 | Resource | Quantity | ≈ $/hour | Billed while idle? |
 |---|---|---|---|
-| Application VMs `n1-standard-1` + 10 GB disk | 1 (min) … 5 (approved max) | 0.063 each | yes, at least `min_instances` |
+| Application VMs `n2-standard-2` + 10 GB disk | 1 (min) … 5 (approved max) | 0.115 each | yes, at least `min_instances` |
 | Cloud SQL PostgreSQL `db-custom-1-3840`, 10 GB SSD, zonal, no backups | 1 | 0.084 | **yes, 24/7** |
 | External Application Load Balancer: forwarding rule + static IP | 1 | 0.035 | **yes, 24/7** (+ ~$0.008/GB processed) |
-| Load-generator VM `e2-small` + disk + ephemeral IP | 1 | 0.027 | yes |
+| Load-generator VM `e2-standard-2` + disk + ephemeral IP | 1 | 0.083 | yes |
+| Waiting-room VMs `e2-small` + disk | 2 | 0.022 each | yes |
+| Memorystore for Redis, basic tier, 1 GB (waiting-room state) | 1 | 0.058 | **yes, 24/7** |
 | Cloud Run control plane, 1 vCPU / 512 MiB, always allocated, min 1 | 1 | 0.068 | **yes, 24/7** |
 | Firestore, Secret Manager, Artifact Registry, Logging, Monitoring, PSC endpoint | — | ≈ 0.01 | mostly free tier |
 
-* **Idle (1 app VM): ≈ $0.29/hour ≈ $7/day ≈ $210/month.**
-* **Peak (5 app VMs): ≈ $0.54/hour.**
+* **Idle (1 app VM): ≈ $0.50/hour ≈ $12/day ≈ $360/month.**
+* **Peak (5 app VMs): ≈ $0.96/hour.**
+* Sizes were raised on 2026-10-11 (app VMs n1-standard-1 → n2-standard-2, generator e2-small → e2-standard-2, waiting room 1 → 2 VMs + Redis). The earlier measured results in the guides used the smaller sizes; the old idle cost was ≈ $0.29/hour.
 * A 10-minute ramp experiment plus 25 minutes of cool-down at up to 5 VMs: **≈ $0.30**.
 * Network: synthetic traffic between the generator and the LB in the same region is small (a 10-minute 100 arrivals/s run moves well under 1 GB).
 

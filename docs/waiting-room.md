@@ -22,7 +22,7 @@ still waiting are told "sold out" without ever touching an application server.
 ```text
                                    External Application Load Balancer (http://<ip>)
  load generator VM                 URL map
- (synthetic customers)  ──HTTP──▶   /queue/*  ───────────────▶  waiting-room backend ──▶  queue VM (Go, 1 instance)
+ (synthetic customers)  ──HTTP──▶   /queue/*  ───────────────▶  waiting-room backend ──▶  queue VMs (Go, 2, shared Redis)
                                     everything else ─────────▶  app backend ──┬──▶ app VM 1           │
                                                                              ├──▶ app VM 2           │ every 2 s: LB backend health
                                                                              └──▶ app VM 3 (max)     │   (Compute API getHealth)
@@ -60,11 +60,12 @@ sequenceDiagram
 |---|---|
 | Queue inside the Laravel app, state in PostgreSQL | Rejected: thousands of waiting customers polling would hit the 1-vCPU database and the very servers that are full. |
 | Cloud Run service | Rejected: needs a serverless NEG and public invoker IAM the deploying account cannot grant; FIFO state must be single-instance anyway. |
-| **Dedicated small VM, in-memory FIFO, `/queue/*` path rule on the existing LB** | **Chosen.** One process is the single source of truth for order; long polling keeps thousands of waiters cheap; same host for the generator (its target allowlist is unchanged); reachable privately by the control plane. |
+| **Dedicated small VMs, FIFO in Memorystore for Redis, `/queue/*` path rule on the existing LB** | **Chosen.** Redis is the single source of truth for order; long polling keeps thousands of waiters cheap; same host for the generator (its target allowlist is unchanged); reachable privately by the control plane. |
 
-The queue VM is a single point of failure by design (lab scope). If it restarts, the queue is lost and
-customers must re-join; tokens already issued stay valid until they expire because verification is
-stateless.
+The first version was one VM with the line in memory: a restart, deploy or crash lost everybody's
+place. The queue now runs as several stateless instances sharing one Redis (section 5); the memory
+store remains as a fallback (`STORE=memory`, one instance). Tokens already issued stay valid across
+any of this because verification is stateless.
 
 ---
 
@@ -271,6 +272,10 @@ All require `Authorization: Bearer <LAB_ADMIN_TOKEN>`; 401 otherwise.
 | `POST /admin/reset` | — | 200; clears queue, active set, counters; keeps config |
 | `GET /admin/stats` | — | 200 `{data: Stats}` |
 
+Every instance answers every endpoint (public and admin) with the same data. If the shared store
+(Redis) is unreachable, join, status, release and the admin endpoints answer
+`503 {"error":"store_unavailable"}` (clients retry).
+
 ```json
 Stats {
   "enabled": true, "eventId": "<uuid>", "soldOut": false,
@@ -294,7 +299,11 @@ Stats {
   //   "signals": {"busy": 0.81, "activeWorkers": 26, "totalWorkers": 32, "listenQueue": 0,
   //               "cpu": 0.74, "cpuSampledAt": "...", "observedAt": "..."} | null
   //   (activeWorkers = min(in flight, workers); listenQueue = in flight beyond the worker count)
-  "updatedAt": "..."
+  "updatedAt": "...",
+  // high availability (section 5):
+  "store": "memory | redis", "instance": "<hostname that answered>",
+  "leader": true,                            // this instance runs admission now
+  "leaderInstance": "<hostname of the leader>" | null   // null for a few seconds after a crash
 }
 ```
 
@@ -310,6 +319,8 @@ Stats {
 | `APP_PORT` | app port on VM private IPs (default 8080) |
 | `CAPACITY_POLL_MS` / `INVENTORY_POLL_MS` | defaults 2000 / 1000 |
 | `SIGNAL_POLL_MS` / `CONTROL_INTERVAL_MS` | defaults 1000 / 1000 (adaptive mode: per-server load signals and controller step) |
+| `STORE` | `memory` (default; one instance) or `redis` (any number of instances, section 5) |
+| `REDIS_ADDR`, `REDIS_PASSWORD` | for `redis`: `host:port`; password optional (Memorystore without AUTH in the lab) |
 
 ### 3.5a Ticketing API load endpoints (VPC only, served by nginx without PHP)
 
@@ -432,3 +443,162 @@ slow-start overshoot, no limits drifting apart under an even load balancer.
 
 or press **F** in the dashboard presets. The **Waiting room** panel and chart show waiting, active /
 capacity and healthy servers live; the report has a `waitingRoom` section.
+
+---
+
+## 5. High availability
+
+**Goal:** a restart, deploy or crash of one queue server loses nobody's place in line. The queue
+servers are stateless; everything that matters lives in one Redis, and one elected instance (the
+leader) runs the parts that must happen exactly once.
+
+```mermaid
+flowchart LR
+    C[Customers] -->|/queue/* round robin| LB[External LB<br/>locally: nginx]
+    CP[Control plane] -->|/admin/* fixed private IP| ILB[Internal passthrough LB<br/>locally: same nginx]
+    LB --> Q1[Queue server 1<br/>leader]
+    LB --> Q2[Queue server 2]
+    LB --> QN[Queue server N]
+    ILB --> Q1
+    ILB --> Q2
+    ILB --> QN
+    Q1 <-->|Lua scripts| R[(Redis<br/>line, entries, counters,<br/>config, leader lease)]
+    Q2 <--> R
+    QN <--> R
+    R -. pub/sub wr:events<br/>admitted ids / sold out / reset .-> Q1
+    R -.-> Q2
+    R -.-> QN
+    Q1 -->|leader only: capacity, inventory,<br/>signals pollers| APP[App servers]
+```
+
+### Who does what
+
+| Every instance | The leader only |
+|---|---|
+| `POST /queue/join`, `GET /queue/status` (long poll), `POST /queue/release` | 100 ms admission tick (one atomic Lua script: expire TTLs, drop people who stopped checking in, sold-out decision, admit from the head while active < capacity, prune) |
+| `/admin/config`, `/admin/reset`, `/admin/stats` (same numbers from any instance) | adaptive controller step (1 s) |
+| renders an admitted customer's token (HMAC over `q`, `e`, `exp`, so nothing is stored) | capacity (LB backend health), inventory and load-signal pollers |
+
+Every customer operation is one Lua script, so concurrent instances can never double-admit, admit out
+of order or lose a counter.
+
+**Every script is O(batch), never O(line).** Redis runs one script at a time and blocks every other
+client meanwhile. The first version walked the whole line in one script when it declared sold out or
+dropped people who had left, and read every wait sample for each stats call; in a local
+10,000-customer run with ~6,600 waiting that produced 100+ ms scripts, lease renewals timing out,
+leadership flapping and stats failing for minutes. Now:
+
+| Work | Bound per call |
+|---|---|
+| join, status, release, stats, controller | O(1) or O(log n) commands (`ZRANK`, `ZCARD`, `ZRANGE line 0 0`); whole-key reads only of bounded keys |
+| admission | pops at most min(free capacity, budget, 500) with one `ZPOPMIN` |
+| expiring admissions, dropping people who stopped checking in, pruning finished entries | `ZRANGEBYSCORE … LIMIT 0 500` per tick; a full batch continues on the next tick (admission waits until the abandonment backlog is gone, so nobody who left is admitted) |
+| sold out | declaring is O(1): a flag makes everyone still in line `sold_out` at once (status, join, release and stats honour it), `soldOutTotal` grows by `ZCARD line`, one `*` message wakes every long poll; the line is then drained 500 per tick |
+| reset / new event | `UNLINK` (big keys are freed in the background) |
+
+Each batch uses a fixed number of multi-member commands (`HMGET`/`HSET`/`ZREM`/`ZADD` with up to 500
+members), so a tick is at most ~25 Redis commands whatever the line length.
+`queue/redis_scale_test.go` pins this with 12,000 people in line on miniredis (command count per
+operation, and no unbounded read of a key that grows with the line); against the real Redis with
+20,000 in line the slowest script was 2.3 ms server-side (`SLOWLOG`, threshold 1 ms). Positions are `ZRANK` in the line, so they are identical everywhere.
+
+### Leader election and failover
+
+* Lease `wr:leader` = `SET NX PX 5000` with value `<hostname>/<random>`, renewed every 1 s by a script
+  that only extends the lease if it still holds it, on its own small connection pool (renewals never
+  queue behind customer traffic). One slow or failed renewal does not end leadership: the leader keeps
+  going while the lease it last renewed is certainly valid (4 s) and steps down only when Redis says
+  the lease is someone else's, or after 4 s without a successful renewal.
+* Every leader-side script is **fenced**: it first checks that `wr:leader` still holds this instance's
+  value. A leader that paused (GC, network) and lost its lease cannot act on stale belief; it steps down.
+* **Graceful stop** (deploy, `docker compose restart`, MIG replacement, SIGTERM): the instance answers its
+  open long polls, releases the lease, and another instance takes over within one renewal interval
+  (≤ 1 s).
+* **Crash** (kill -9, VM lost): the lease expires; another instance takes over **within ~5 s**.
+  Meanwhile joins, status and releases keep working on the other instances; only admissions pause.
+* Long polls wait on a local channel per queue id. The leader publishes `w <ids…>` (admitted, removed),
+  `*` (sold out, reset, new event) on `wr:events`; each instance wakes its local waiters. A missed
+  message (pub/sub reconnect) only delays a waiter: every waiting long poll re-checks Redis once a
+  second.
+
+### Key layout (prefix `wr:`)
+
+| Key | Type | Contents |
+|---|---|---|
+| `config` | hash | `json` (full Config), plus `enabled`, `event`, `per`, `ttl`, `grace`, `mode`, `wto`, `start` for the scripts, `gen` (bumped on every clear). Written by `PUT /admin/config` on any instance, read by all — so there is no config cache to go stale. |
+| `seq` | string | ticket counter (`INCR` on join) |
+| `line` | zset | waiting queue ids scored by ticket number (FIFO) |
+| `seen` | zset | waiting queue id → last check-in (ms), for the abandonment sweep |
+| `entries` | hash | queue id → `state,joinedMs,expMs,customerRef` (state `w`/`a`/`r`/`x`/`s`) |
+| `customers` | hash | customerRef → queue id while waiting or admitted (idempotent join) |
+| `active` | zset | admitted queue id → expiry (ms) |
+| `finished` | zset | released/expired/sold-out id → finished at; forgotten after an hour |
+| `counters` | hash | joined, admitted, released, expired, soldOut, leftWaiting, abandoned, `rel:<outcome>`, waitCount, waitMax |
+| `state` | hash | sold-out flag, inventory observation and budget, zero-since, controller (limit, phase, decision, reason, decreases, last cut), sweep/prune clocks |
+| `rate` | hash | admissions per 100 ms slot (last 10 s, at most 100 fields); the leader stores the sum in `state` every tick |
+| `waits` | list | join → admitted samples: every sample up to 2,000, then a uniform reservoir of 2,000 (p50/p95 are exact up to 2,000 admissions, sampled beyond; `max` and `count` are always exact). The memory store keeps 200,000. |
+| `signals` | hash | server name → latest load signals |
+| `capacity`, `capacity:names` | hash, set | latest healthy servers (written by the leader; kept across reset) |
+| `leader` | string | the lease |
+
+A new event, `enabled:false` or `POST /admin/reset` unlinks every key above except `config`,
+`capacity*` and `leader`, atomically, and wakes every waiter (they get `unknown_queue_id`, as before).
+
+The HTTP API, token format, admission rules, adaptive controller and stats are unchanged; the room's
+behavioural tests run against both stores (`queue/store_test.go`).
+
+### Measured locally (docker compose: Redis 7, two replicas behind nginx, 2026-10-11)
+
+| Scenario | Result |
+|---|---|
+| 8 customers joined through nginx (alternating replicas); stats read from each replica directly | identical `waiting 8`, `joinedTotal 8`, `leaderInstance waiting-room-1` on both |
+| `docker compose restart waiting-room-1` (the leader) with a long poll in flight | the poll was answered at shutdown (client re-polls); lease released and re-acquired in 0.4 s; all 8 positions unchanged |
+| `docker kill -s KILL` the leader | `waiting-room-2` became leader **5.3 s** later; line, positions and counters intact |
+| Both replicas recreated at the same time | line intact (it lives in Redis); the new leader admitted the head of the line |
+| Kill the leader mid-sale (capacity 2, customers long-poll and release through nginx) | admission order 1, 2, 3, *kill*, 4, 5, 6, 7, 8 — FIFO kept; customers 6–8 admitted by the new leader ~4.9 s after the kill; final `admitted 8, released 8, waiting 0` |
+| 5,000 customers, 2,000 concurrent long polls, two servers on one Redis (`WR_REDIS_ADDR=… go test ./server -run RedisLoad`) | joins 14,500/s; drained in 3.1 s (memory store, one server: 2.6 s); wait p50 1.6 s / p95 2.5 s; every customer admitted exactly once |
+
+**Preset F locally** (10,000 customers at 84/s, 4,000 tickets, adaptive room, `STORE=redis`, two
+replicas behind nginx; experiment `exp_20261011_125635_4fc0`), leader killed with `kill -9` at t+46 s
+when 2,037 people were waiting, restarted 20 s later:
+
+| | Result |
+|---|---|
+| Failover | `waiting-room-2` became leader 5 s after the kill; admissions resumed (admitted 1,703 at t+49 s → 1,773 at t+52 s); the restarted instance rejoined as a follower; no further leadership changes |
+| Errors | no `context deadline exceeded`, no lost leadership, no `store error` in either replica's log during the run |
+| Sale | 4,000 sold, 0 held at the end; peak waiting 6,113; 4,477 admitted; sold out declared at t+176 s (when the last holds resolved): **5,523 told** without touching the app (4,477 + 5,523 = 10,000) |
+| Control plane | `/api/state` waiting-room view `live` in every 3 s sample for the whole run |
+| Redis `SLOWLOG` (> 10 ms) | 25 entries, max 138 ms — all of them the O(log n) status script, or single commands inside it (one `HGET` at 13.7 ms, one `ZADD` at 111 ms), while the 4-vCPU Docker VM was saturated by the app server, the generator and nginx. Script latency over the whole Redis uptime: p50 40 µs, p99 0.68 ms, p99.9 4.4 ms; `HGET` p99.9 32 µs. These outliers are Redis being descheduled, not script cost; on GCP Memorystore has its own vCPU. |
+
+Before the O(batch) rework, the same preset made scripts take 100+ ms, lease renewals time out,
+leadership flap every few seconds and the control plane's waiting-room view freeze for ~6 minutes.
+
+Not measured: anything in Google Cloud (below).
+
+### Google Cloud
+
+* Queue VMs: a zonal **managed instance group** of `queue_replicas` (default 2) `e2-small` COS VMs from
+  an instance template; the image is part of the template, so a new image rolls out one VM at a time
+  (`max_surge 1`, `max_unavailable 0`) and nobody loses their place. Autohealing recreates a VM whose
+  `/queue/health` stops answering (initial delay 180 s).
+* Customers: the existing external load balancer's `/queue/*` backend service points at the MIG
+  (balancing mode `RATE`, because the same instance group also backs the internal load balancer and
+  `UTILIZATION` cannot be shared with another mode).
+* Control plane: an **internal passthrough load balancer** on the same fixed private IP as before
+  (`${prefix}-queue-ip`), so `WAITING_ROOM_URL` / `module.waiting_room[0].private_url` is unchanged.
+* Redis: **Memorystore for Redis** `BASIC`, 1 GB, Redis 7.2, `maxmemory-policy noeviction`,
+  `authorized_network` = lab VPC, `connect_mode = DIRECT_PEERING`, reserved range `10.60.32.0/29`.
+  Private Service Access is not an option: the deploying account lacks
+  `servicenetworking.services.addPeering`. Direct peering is created by Memorystore itself and is
+  **assumed** to work with this account — unverified until the next deploy. No firewall rule is
+  needed (VPC egress is open; the Redis side is Google-managed); the existing rules already admit the
+  load balancers' health checks to the queue VMs by tag.
+* BASIC has no replica: a Memorystore failure or maintenance loses the line (as a queue VM restart did
+  before). `redis_tier = "STANDARD_HA"` adds a replica with automatic failover, at about twice the price.
+* Fallback: `waiting_room_store = "memory"` deploys one VM, no Memorystore, no Redis API.
+* Cost (list, europe-west2): Memorystore BASIC 1 GB ≈ **$0.06/h**, one more `e2-small` ≈ **$0.02/h**;
+  the internal forwarding rule adds forwarding-rule charges (small; not measured).
+* Teardown: `redis.googleapis.com` is in the APIs the lab disables, and `teardown.sh` checks that no
+  `ticketing-scale-lab*` Memorystore instance is left.
+* **Untested in Google Cloud** until the next deploy: Memorystore direct peering, the internal
+  passthrough load balancer sharing the MIG with the external one, and MIG rolling updates of the queue.
