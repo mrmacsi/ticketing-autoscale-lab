@@ -282,3 +282,23 @@ func TestAdaptiveConfigValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestLimitDoesNotGrowWhenAdmittedCustomersDoNotArrive(t *testing.T) {
+	r, c := newAdaptiveRoom(t, 20, "a")
+	fill(t, r, 300)
+	for range 10 {
+		c.Add(time.Second)
+		signal(r, c, "a", 0, 0, 5) // idle server although the room is full: no-shows
+		step(r)
+	}
+	if v := limitOf(t, r, "a"); v.Limit != 20 || v.Decision != DecisionHold {
+		t.Fatalf("limit grew on no-shows: %+v", v)
+	}
+	// Customers arrive: requests in flight → headroom growth resumes.
+	c.Add(time.Second)
+	signal(r, c, "a", 8, 0, 40)
+	step(r)
+	if v := limitOf(t, r, "a"); v.Limit != 25 || v.Decision != DecisionIncrease {
+		t.Fatalf("growth should resume: %+v", v)
+	}
+}

@@ -39,15 +39,46 @@ services:
       FPM_MAX_CHILDREN: "16"
     ports: ["8080:8080"]
 
-  # Waiting room: locally the single API container is the only "server"; it counts as healthy while
-  # its /health answers 200 (on GCP the load balancer's backend health is used instead).
-  waiting-room:
+  # Waiting room, highly available: two stateless queue replicas share one Redis (the line, counters
+  # and config live there; one replica is elected leader and admits), behind nginx under the service
+  # name `waiting-room` so QUEUE_BASE_URL / WAITING_ROOM_URL stay http://waiting-room:8080. Locally the
+  # single API container is the only "server"; it counts as healthy while its /health answers 200 (on
+  # GCP the load balancer's backend health is used instead). docs/waiting-room.md, "High availability".
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["16379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
+  waiting-room-1: &waiting-room-replica
     build: ./apps/waiting-room
-    depends_on: [ticketing-api]
+    hostname: waiting-room-1
+    depends_on:
+      ticketing-api: { condition: service_started }
+      redis: { condition: service_healthy }
     environment:
       LAB_ADMIN_TOKEN: *lab-admin-token
       CAPACITY_SOURCE: static
       STATIC_BACKENDS: http://ticketing-api:8080
+      STORE: redis
+      REDIS_ADDR: redis:6379
+    ports: ["18083:8080"]
+
+  waiting-room-2:
+    <<: *waiting-room-replica
+    hostname: waiting-room-2
+    ports: ["18084:8080"]
+
+  waiting-room:
+    image: nginx:1.27-alpine
+    depends_on: [waiting-room-1, waiting-room-2]
+    volumes:
+      - ./local/waiting-room-nginx.conf:/etc/nginx/nginx.conf:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
     ports: ["18082:8080"]
 
   control-api:

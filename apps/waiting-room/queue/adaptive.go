@@ -27,6 +27,13 @@ const (
 // DemandFill is the share of the capacity in use at or above which a limit may grow.
 const DemandFill = 0.8
 
+// MinInFlightPerActive is the share of admitted customers that must show up as requests in flight on
+// the servers before the limit may grow. Admitted customers who never arrive (closed the page, or a
+// broken path to the app) leave the servers idle; read as "headroom" that would inflate the limit
+// (measured locally: 14 → 200 while sales stalled). A checkout journey keeps ~0.3–0.8 requests in
+// flight per customer, so 5 % only rules out rooms that are full of no-shows.
+const MinInFlightPerActive = 0.05
+
 // SignalMaxAge is how old a server's load signals may be before the controller ignores them.
 const SignalMaxAge = 3 * time.Second
 
@@ -165,25 +172,40 @@ func (r *Room) limitLocked(name string) *serverLimit {
 	return st
 }
 
-func (r *Room) startLimitLocked() int {
-	a := r.cfg.Adaptive
-	return min(max(r.cfg.ActiveUsersPerServer, a.MinPerServer), a.MaxPerServer)
+func startLimit(cfg Config) int {
+	a := cfg.Adaptive
+	return min(max(cfg.ActiveUsersPerServer, a.MinPerServer), a.MaxPerServer)
 }
 
-// sharedLimitLocked is the current limit per healthy server in adaptive mode.
-func (r *Room) sharedLimitLocked() int {
-	if r.ctl.limit == 0 {
-		r.ctl.limit, r.ctl.phase, r.ctl.decision, r.ctl.reason = r.startLimitLocked(), PhaseSlowStart, DecisionHold, "starting value"
+// shared is the current limit per healthy server in adaptive mode (initialized on first use).
+func (c *controller) shared(cfg Config) int {
+	if c.limit == 0 {
+		c.limit, c.phase, c.decision, c.reason = startLimit(cfg), PhaseSlowStart, DecisionHold, "starting value"
 	}
-	return r.ctl.limit
+	return c.limit
 }
+
+// capacityFor is the number of customers that may be in checkout at once.
+func capacityFor(cfg Config, healthy int, c *controller) int {
+	if cfg.AdmissionMode != ModeAdaptive {
+		return healthy * cfg.ActiveUsersPerServer
+	}
+	return healthy * c.shared(cfg)
+}
+
+// signalLookup returns the latest load signals of a healthy server, or nil.
+type signalLookup func(name string) *Signals
+
+func (r *Room) sharedLimitLocked() int { return r.ctl.shared(r.cfg) }
 
 // capacityLocked is the number of customers that may be in checkout at once.
-func (r *Room) capacityLocked() int {
-	if r.cfg.AdmissionMode != ModeAdaptive {
-		return r.healthy * r.cfg.ActiveUsersPerServer
+func (r *Room) capacityLocked() int { return capacityFor(r.cfg, r.healthy, &r.ctl) }
+
+func (r *Room) signalsLocked(name string) *Signals {
+	if st := r.limits[name]; st != nil {
+		return st.signals
 	}
-	return r.healthy * r.sharedLimitLocked()
+	return nil
 }
 
 // worst is the most loaded value of each signal across the healthy servers with fresh signals.
@@ -192,18 +214,19 @@ type worst struct {
 	busy, cpu        float64
 	busyAt, cpuAt    int
 	fresh, missingAt int // number of servers with fresh signals; index of one without (or -1)
+	inFlight         int // requests in flight (running or waiting for a worker) summed over fresh servers
 }
 
-func (r *Room) worstLocked(now time.Time) worst {
+func worstOf(servers []Server, sigOf signalLookup, now time.Time) worst {
 	w := worst{cpu: -1, queueAt: -1, busyAt: -1, cpuAt: -1, missingAt: -1}
-	for i, srv := range r.servers {
-		st := r.limitLocked(srv.Name)
-		if st == nil || st.signals == nil || now.Sub(st.signals.observedAt) > SignalMaxAge {
+	for i, srv := range servers {
+		sig := sigOf(srv.Name)
+		if sig == nil || now.Sub(sig.observedAt) > SignalMaxAge {
 			w.missingAt = i
 			continue
 		}
-		sig := st.signals
 		w.fresh++
+		w.inFlight += sig.ActiveWorkers + sig.ListenQueue
 		if sig.ListenQueue > w.queue || w.queueAt < 0 {
 			w.queue, w.queueAt = sig.ListenQueue, i
 		}
@@ -226,34 +249,38 @@ func (r *Room) Control() {
 	if !r.cfg.Enabled || r.cfg.AdmissionMode != ModeAdaptive {
 		return
 	}
-	r.sharedLimitLocked()
-	decision, reason := r.stepLocked(now)
-	r.ctl.decision, r.ctl.reason, r.ctl.decisionAt = decision, reason, now
+	r.ctl.control(r.cfg, r.servers, r.signalsLocked, len(r.active), r.healthy, now)
 }
 
-func (r *Room) short(i int) string {
-	n := r.servers[i].Name
+// control runs one controller step and records the decision (adaptive mode, room enabled).
+func (c *controller) control(cfg Config, servers []Server, sigOf signalLookup, active, healthy int, now time.Time) {
+	c.shared(cfg)
+	decision, reason := c.step(cfg, servers, sigOf, active, healthy, now)
+	c.decision, c.reason, c.decisionAt = decision, reason, now
+}
+
+func shortName(servers []Server, i int) string {
+	n := servers[i].Name
 	if j := strings.LastIndex(n, "-"); j >= 0 && j < len(n)-1 {
 		return n[j+1:]
 	}
 	return n
 }
 
-func (r *Room) stepLocked(now time.Time) (string, string) {
-	a := r.cfg.Adaptive
-	c := &r.ctl
-	w := r.worstLocked(now)
+func (c *controller) step(cfg Config, servers []Server, sigOf signalLookup, active, healthy int, now time.Time) (string, string) {
+	a := cfg.Adaptive
+	w := worstOf(servers, sigOf, now)
 	if w.fresh == 0 {
 		return DecisionHold, "no signal"
 	}
 	var overload string
 	switch {
 	case w.queue > 0:
-		overload = fmt.Sprintf("listen queue %d on %s", w.queue, r.short(w.queueAt))
+		overload = fmt.Sprintf("listen queue %d on %s", w.queue, shortName(servers, w.queueAt))
 	case w.busy >= a.BusyHigh:
-		overload = fmt.Sprintf("workers busy %.0f%% on %s", w.busy*100, r.short(w.busyAt))
+		overload = fmt.Sprintf("workers busy %.0f%% on %s", w.busy*100, shortName(servers, w.busyAt))
 	case w.cpu >= a.CPUHigh:
-		overload = fmt.Sprintf("CPU %.0f%% on %s", w.cpu*100, r.short(w.cpuAt))
+		overload = fmt.Sprintf("CPU %.0f%% on %s", w.cpu*100, shortName(servers, w.cpuAt))
 	}
 	if overload != "" {
 		if !c.lastDecrease.IsZero() && now.Sub(c.lastDecrease) < time.Duration(a.CooldownSeconds)*time.Second {
@@ -266,16 +293,18 @@ func (r *Room) stepLocked(now time.Time) (string, string) {
 	}
 	// Grow only while the capacity itself is what holds customers back: the room is (nearly) full.
 	// People waiting is not enough: near a sell-out they wait for tickets, not for capacity.
-	capacity := r.capacityLocked()
-	demand := capacity > 0 && float64(len(r.active)) >= DemandFill*float64(capacity)
+	capacity := capacityFor(cfg, healthy, c)
+	demand := capacity > 0 && float64(active) >= DemandFill*float64(capacity)
 	headroom := w.queue == 0 && w.busy < a.BusyLow && w.cpu < a.CPULow
 	switch {
 	case w.missingAt >= 0:
-		return DecisionHold, "no signal from " + r.short(w.missingAt)
+		return DecisionHold, "no signal from " + shortName(servers, w.missingAt)
 	case !headroom:
 		return DecisionHold, "near the limit"
 	case !demand:
 		return DecisionHold, "capacity not in use"
+	case float64(w.inFlight) < math.Ceil(MinInFlightPerActive*float64(active)):
+		return DecisionHold, fmt.Sprintf("admitted customers not arriving (%d in flight for %d admitted)", w.inFlight, active)
 	case c.limit >= a.MaxPerServer:
 		return DecisionHold, "at maximum"
 	}
@@ -289,20 +318,24 @@ func (r *Room) stepLocked(now time.Time) (string, string) {
 
 // serverViewsLocked builds Stats.Servers.
 func (r *Room) serverViewsLocked() []ServerView {
-	out := make([]ServerView, 0, len(r.servers))
-	adaptive := r.cfg.AdmissionMode == ModeAdaptive
-	for _, s := range r.servers {
-		v := ServerView{Name: s.Name, IP: s.IP, Limit: r.cfg.ActiveUsersPerServer, Phase: PhaseFixed, Decision: DecisionHold, Reason: "fixed mode"}
+	return serverViews(r.cfg, r.servers, &r.ctl, r.signalsLocked)
+}
+
+func serverViews(cfg Config, servers []Server, c *controller, sigOf signalLookup) []ServerView {
+	out := make([]ServerView, 0, len(servers))
+	adaptive := cfg.AdmissionMode == ModeAdaptive
+	for _, s := range servers {
+		v := ServerView{Name: s.Name, IP: s.IP, Limit: cfg.ActiveUsersPerServer, Phase: PhaseFixed, Decision: DecisionHold, Reason: "fixed mode"}
 		if adaptive {
-			v.Limit, v.Phase, v.Decision, v.Reason, v.Decreases = r.sharedLimitLocked(), r.ctl.phase, r.ctl.decision, r.ctl.reason, r.ctl.decreases
-			if !r.ctl.decisionAt.IsZero() {
-				t := FormatTime(r.ctl.decisionAt)
+			v.Limit, v.Phase, v.Decision, v.Reason, v.Decreases = c.shared(cfg), c.phase, c.decision, c.reason, c.decreases
+			if !c.decisionAt.IsZero() {
+				t := FormatTime(c.decisionAt)
 				v.DecisionAt = &t
 			}
 		}
-		if st := r.limits[s.Name]; st != nil && st.signals != nil {
-			sig := *st.signals
-			v.Signals = &sig
+		if sig := sigOf(s.Name); sig != nil {
+			cp := *sig
+			v.Signals = &cp
 		}
 		out = append(out, v)
 	}

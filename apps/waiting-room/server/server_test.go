@@ -34,7 +34,7 @@ type env struct {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	room := queue.New(token.NewSigner(admin), nil)
-	srv := httptest.NewServer(New(room, admin, nil))
+	srv := httptest.NewServer(New(queue.Memory(room), admin, nil))
 	t.Cleanup(func() { room.Close(); srv.Close() })
 	return &env{t: t, room: room, srv: srv, c: &http.Client{Timeout: 30 * time.Second}}
 }
@@ -169,7 +169,7 @@ func TestConfigValidation(t *testing.T) {
 
 func TestHealthReportsVersion(t *testing.T) {
 	room := queue.New(token.NewSigner(admin), nil)
-	h := New(room, admin, nil)
+	h := New(queue.Memory(room), admin, nil)
 	h.Version = "v-test"
 	srv := httptest.NewServer(h)
 	t.Cleanup(func() { room.Close(); srv.Close() })

@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	redis "github.com/redis/go-redis/v9"
+
 	"github.com/mrmacsi/ticketing-autoscale-lab/waiting-room/capacity"
 	"github.com/mrmacsi/ticketing-autoscale-lab/waiting-room/gcp"
 	"github.com/mrmacsi/ticketing-autoscale-lab/waiting-room/inventory"
@@ -81,15 +83,27 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 
-	room := queue.New(token.NewSigner(adminToken), nil)
+	room, closeStore, err := openStore(ctx, token.NewSigner(adminToken), log)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
 	room.SetCapacity(queue.CapacityUpdate{Source: source.Name()})
 
+	// Every instance serves customers; only the leader (always, for the memory store) admits, runs the
+	// controller and polls the app servers. A new leader picks up within one interval.
 	bg, cancelBG := context.WithCancel(context.Background())
 	defer cancelBG()
+	monitor := &capacity.Monitor{Source: source, Apply: room.SetCapacity, Interval: ms(capPoll), Log: log}
+	invPoller := &inventory.Poller{Room: room, Client: appClient, Interval: ms(invPoll), Log: log}
+	sigPoller := &signals.Poller{Room: room, Client: appClient, Interval: ms(sigPoll), Log: log}
+	if room.Leading() {
+		monitor.Poll(bg)
+	}
 	go room.Run(bg, 100*time.Millisecond)
-	go (&capacity.Monitor{Source: source, Apply: room.SetCapacity, Interval: ms(capPoll), Log: log}).Run(bg)
-	go (&inventory.Poller{Room: room, Client: appClient, Interval: ms(invPoll), Log: log}).Run(bg)
-	go (&signals.Poller{Room: room, Client: appClient, Interval: ms(sigPoll), Log: log}).Run(bg)
+	go whileLeading(bg, room, ms(capPoll), monitor.Poll)
+	go whileLeading(bg, room, ms(invPoll), invPoller.Poll)
+	go whileLeading(bg, room, ms(sigPoll), sigPoller.Poll)
 	go room.RunControl(bg, ms(controlInterval))
 	go logSummary(bg, room, log)
 
@@ -105,7 +119,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Info("waiting room listening", "version", version, "port", port, "capacitySource", source.Name(),
+	log.Info("waiting room listening", "version", version, "port", port, "store", room.Kind(), "instance", queue.Hostname(),
+		"capacitySource", source.Name(),
 		"appPort", appPort, "capacityPollMs", capPoll, "inventoryPollMs", invPoll, "signalPollMs", sigPoll, "controlIntervalMs", controlInterval)
 
 	select {
@@ -183,8 +198,76 @@ func capacitySource(tokens gcp.TokenSource, apiClient, appClient *http.Client, a
 	}
 }
 
-// logSummary writes one line every 10 s while the room is enabled.
-func logSummary(ctx context.Context, room *queue.Room, log *slog.Logger) {
+// openStore builds the store selected by STORE: memory (default, one instance) or redis
+// (REDIS_ADDR, optional REDIS_PASSWORD; any number of instances share it and elect a leader).
+func openStore(ctx context.Context, signer *token.Signer, log *slog.Logger) (queue.Store, func(), error) {
+	switch kind := os.Getenv("STORE"); kind {
+	case "", queue.StoreMemory:
+		room := queue.Memory(queue.New(signer, nil))
+		return room, func() {}, nil
+	case queue.StoreRedis:
+		addr := os.Getenv("REDIS_ADDR")
+		if addr == "" {
+			return nil, nil, errors.New("STORE=redis needs REDIS_ADDR (host:port)")
+		}
+		rdb := redis.NewClient(&redis.Options{
+			Addr:         addr,
+			Password:     os.Getenv("REDIS_PASSWORD"),
+			DialTimeout:  2 * time.Second,
+			ReadTimeout:  2 * time.Second,
+			WriteTimeout: 2 * time.Second,
+			PoolSize:     64,
+			MinIdleConns: 4,
+		})
+		var room *queue.RedisRoom
+		var err error
+		for attempt := range 15 { // Redis may still be starting (compose) or the network not ready (VM boot)
+			if attempt > 0 {
+				log.Warn("redis not reachable yet", "addr", addr, "err", err)
+				select {
+				case <-ctx.Done():
+					rdb.Close()
+					return nil, nil, ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
+			}
+			cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			room, err = queue.NewRedis(cctx, rdb, signer, queue.RedisOptions{Elect: true, Log: log})
+			cancel()
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			rdb.Close()
+			return nil, nil, err
+		}
+		log.Info("redis store connected", "addr", addr, "instance", room.Instance(), "leader", room.Leading())
+		return room, func() { room.Close(); rdb.Close() }, nil
+	default:
+		return nil, nil, fmt.Errorf("STORE must be memory or redis, got %q", kind)
+	}
+}
+
+// whileLeading calls f every interval while this instance is the leader.
+func whileLeading(ctx context.Context, room queue.Store, interval time.Duration, f func(context.Context)) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if room.Leading() {
+				f(ctx)
+			}
+		}
+	}
+}
+
+// logSummary writes one line every 10 s while the room is enabled (leader only, so N instances do
+// not log the same numbers N times).
+func logSummary(ctx context.Context, room queue.Store, log *slog.Logger) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	for {
@@ -192,8 +275,11 @@ func logSummary(ctx context.Context, room *queue.Room, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			s := room.Stats()
-			if !s.Enabled {
+			if !room.Leading() {
+				continue
+			}
+			s, err := room.Stats()
+			if err != nil || !s.Enabled {
 				continue
 			}
 			log.Info("room", "waiting", s.Waiting, "active", s.Active, "capacity", s.Capacity,

@@ -16,9 +16,17 @@ import (
 	"github.com/mrmacsi/ticketing-autoscale-lab/waiting-room/queue"
 )
 
+// Room is the part of the waiting room the poller uses (*queue.Room and every queue.Store).
+type Room interface {
+	Config() queue.Config
+	HealthyServers() []queue.Server
+	SetInventory(eventID string, available, held int, appSoldOut bool, at time.Time)
+	SetInventoryUnknown(eventID, reason string)
+}
+
 // Poller reads availability for the room's configured event.
 type Poller struct {
-	Room     *queue.Room
+	Room     Room
 	Client   *http.Client
 	Interval time.Duration
 	Log      *slog.Logger

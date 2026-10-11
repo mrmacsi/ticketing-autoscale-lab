@@ -29,7 +29,7 @@ var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 
 // Server holds the HTTP handlers.
 type Server struct {
-	room      *queue.Room
+	room      queue.Store
 	adminHash [32]byte
 	log       *slog.Logger
 	mux       *http.ServeMux
@@ -39,7 +39,7 @@ type Server struct {
 }
 
 // New builds the handler set. adminToken must not be empty.
-func New(room *queue.Room, adminToken string, log *slog.Logger) *Server {
+func New(room queue.Store, adminToken string, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
@@ -123,6 +123,10 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown_event", "The waiting room is not open for this event.")
 		return
 	}
+	if err != nil {
+		s.unavailable(w, "join", err)
+		return
+	}
 	writeData(w, http.StatusOK, v)
 }
 
@@ -148,7 +152,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// Client went away; nothing useful to write.
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		s.unavailable(w, "status", err)
 	default:
 		writeData(w, http.StatusOK, v)
 	}
@@ -174,7 +178,12 @@ func (s *Server) release(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "outcome must be purchased, sold_out, abandoned or failed.")
 		return
 	}
-	writeData(w, http.StatusOK, map[string]bool{"released": s.room.Release(body.QueueID, body.Outcome)})
+	released, err := s.room.Release(body.QueueID, body.Outcome)
+	if err != nil {
+		s.unavailable(w, "release", err)
+		return
+	}
+	writeData(w, http.StatusOK, map[string]bool{"released": released})
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +280,11 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	old := s.room.Config()
-	c = s.room.Configure(c)
+	c, err := s.room.Configure(c)
+	if err != nil {
+		s.unavailable(w, "config", err)
+		return
+	}
 	s.log.Info("config updated", "enabled", c.Enabled, "eventId", c.EventID,
 		"activeUsersPerServer", c.ActiveUsersPerServer, "admissionTtlSeconds", c.AdmissionTTLSeconds,
 		"soldOutGraceSeconds", c.SoldOutGraceSeconds, "admissionMode", c.AdmissionMode, "cleared", !c.Enabled || c.EventID != old.EventID)
@@ -299,13 +312,27 @@ func validate(c queue.Config) string {
 }
 
 func (s *Server) reset(w http.ResponseWriter, r *http.Request) {
-	s.room.Reset()
+	if err := s.room.Reset(); err != nil {
+		s.unavailable(w, "reset", err)
+		return
+	}
 	s.log.Info("room reset")
 	writeData(w, http.StatusOK, map[string]bool{"reset": true})
 }
 
 func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
-	writeData(w, http.StatusOK, s.room.Stats())
+	st, err := s.room.Stats()
+	if err != nil {
+		s.unavailable(w, "stats", err)
+		return
+	}
+	writeData(w, http.StatusOK, st)
+}
+
+// unavailable answers 503 when the shared store (Redis) failed; clients retry.
+func (s *Server) unavailable(w http.ResponseWriter, op string, err error) {
+	s.log.Warn("store error", "op", op, "err", err)
+	writeError(w, http.StatusServiceUnavailable, "store_unavailable", "The waiting room store is unavailable; retry.")
 }
 
 // decode reads a JSON object body; it returns a user-facing message on failure.

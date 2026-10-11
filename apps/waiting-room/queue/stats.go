@@ -44,6 +44,13 @@ type Stats struct {
 
 	AbandonedTotal        int64 `json:"abandonedTotal"` // dropped from the line for not checking in
 	WaitingTimeoutSeconds int   `json:"waitingTimeoutSeconds"`
+
+	// High availability: which store holds the line, which instance answered, and which instance
+	// runs admission (the leader). The memory store is always its own leader.
+	Store          string  `json:"store"`
+	Instance       string  `json:"instance"`
+	Leader         bool    `json:"leader"`
+	LeaderInstance *string `json:"leaderInstance"`
 }
 
 // WaitMs summarizes join → admitted durations of admitted customers.
@@ -93,7 +100,12 @@ func (r *Room) Stats() Stats {
 		AbandonedTotal:         r.abandonedTotal,
 		WaitingTimeoutSeconds:  r.cfg.WaitingTimeoutSeconds,
 		Adaptive:               r.cfg.Adaptive,
+		Store:                  StoreMemory,
+		Instance:               Hostname(),
+		Leader:                 true,
 	}
+	host := Hostname()
+	s.LeaderInstance = &host
 	if r.cfg.EventID != "" {
 		id := r.cfg.EventID
 		s.EventID = &id

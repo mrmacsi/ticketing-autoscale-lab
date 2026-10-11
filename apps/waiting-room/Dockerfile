@@ -2,7 +2,7 @@
 # Build: docker build --platform linux/amd64 --build-arg APP_VERSION=1.0.0 -t waiting-room apps/waiting-room
 FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG TARGETOS=linux

@@ -21,9 +21,16 @@ import (
 	"github.com/mrmacsi/ticketing-autoscale-lab/waiting-room/queue"
 )
 
+// Room is the part of the waiting room the poller uses (*queue.Room and every queue.Store).
+type Room interface {
+	Config() queue.Config
+	HealthyServers() []queue.Server
+	SetSignals(name string, s queue.Signals)
+}
+
 // Poller fetches signals from every healthy server.
 type Poller struct {
-	Room     *queue.Room
+	Room     Room
 	Client   *http.Client
 	Interval time.Duration
 	Timeout  time.Duration // per request; default 800 ms
