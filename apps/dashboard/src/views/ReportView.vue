@@ -8,6 +8,7 @@ import ChartGrid from '@/components/charts/ChartGrid.vue';
 import { shortInstance } from '@/charts/options';
 import Badge from '@/components/ui/Badge.vue';
 import { fmtClock, fmtDateTime, fmtFractionPct, fmtMs, fmtNumber, fmtPct, fmtRate, fmtTimeOfDay, fmtUsd, parseTime } from '@/lib/format';
+import { scaleInSummary, SCALE_IN_WATCH_MINUTES } from '@/lib/scaleIn';
 import { attributionTone } from '@/lib/tones';
 import { useLab } from '@/store/lab';
 import type { ExportFormat } from '@/api/client';
@@ -69,6 +70,22 @@ const measured = computed<ValueItem[]>(() => {
     { label: 'Payments declined', value: fmtNumber(x.purchases.declined) },
     { label: 'Purchases failed', value: fmtNumber(x.purchases.failed) },
     { label: 'Expired during checkout', value: fmtNumber(x.purchases.expiredDuringCheckout) },
+  ];
+});
+
+const scaleIn = computed(() => m.value?.scaleIn ?? null);
+const scaleInText = computed(() => {
+  const r = report.value;
+  return r ? scaleInSummary(scaleIn.value, r.config.servers.min, { state: r.state, completedAt: r.timestamps.completedAt }) : null;
+});
+const scaleInItems = computed<ValueItem[]>(() => {
+  const s = scaleIn.value;
+  if (!s) return [];
+  return [
+    { label: 'Back at minimum', value: fmtTimeOfDay(s.completedAt), hint: s.completedAt ? 'UTC, Compute API observation' : undefined },
+    { label: 'After traffic stopped', value: s.secondsAfterTrafficStopped != null ? `${fmtNumber(s.secondsAfterTrafficStopped)} s` : '—' },
+    { label: 'Servers removed', value: fmtNumber(s.serversRemoved), hint: 'peak observed − last observed' },
+    { label: 'Observed until', value: fmtTimeOfDay(s.observedUntil), hint: 'UTC' },
   ];
 });
 
@@ -204,6 +221,23 @@ const print = () => window.print();
       </div>
 
       <ValueGroup kind="measured" title="Results" :items="measured" />
+      <section v-if="scaleInText" class="rounded-lg border border-slate-800 bg-slate-900/60 p-3" data-testid="report-scale-in" :data-status="scaleIn?.status ?? 'pending'">
+        <h2 class="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-100"><Badge tone="emerald">Measured</Badge> Scale-in after traffic stopped</h2>
+        <p :class="['text-sm font-semibold', scaleInText.tone === 'good' ? 'text-emerald-300' : scaleInText.tone === 'bad' ? 'text-amber-300' : 'text-slate-200']" data-testid="scale-in-summary">
+          {{ scaleInText.text }}
+        </p>
+        <dl v-if="scaleInItems.length" class="mt-2 grid grid-cols-2 gap-2 min-[480px]:grid-cols-4">
+          <div v-for="it in scaleInItems" :key="it.label" class="min-w-0 rounded-md bg-slate-950/60 px-2.5 py-1.5 ring-1 ring-slate-800">
+            <dt class="truncate text-[11px] text-slate-400">{{ it.label }}</dt>
+            <dd class="truncate font-semibold tabular-nums text-slate-100">{{ it.value }}</dd>
+            <dd v-if="it.hint" class="truncate text-[11px] text-slate-500">{{ it.hint }}</dd>
+          </div>
+        </dl>
+        <p class="mt-1 text-[11px] text-slate-500">
+          The control plane keeps watching the instance group after completion (up to {{ SCALE_IN_WATCH_MINUTES }} min) until it is back at the
+          experiment's minimum with no VM being deleted; those observed events are added to the scaling timeline below.
+        </p>
+      </section>
       <ValueGroup v-if="room" kind="measured" title="Waiting room" :items="waitingRoom" data-testid="report-waiting-room" />
       <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <ValueGroup kind="configured" title="Autoscaler & traffic plan" :items="configured" />

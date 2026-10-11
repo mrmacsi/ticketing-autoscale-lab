@@ -2,6 +2,8 @@ import type { AppConfig } from './config.js';
 
 export interface CostRow {
   resource: string; unit: string; unitCostPerHour: number; quantity: number; perHour: number; billedWhileIdle: boolean; note: string;
+  /** True only for the application-VM row: the dashboard scales it by the live VM count. */
+  perAppServer: boolean;
 }
 
 /**
@@ -10,12 +12,20 @@ export interface CostRow {
  */
 export function costModel(config: AppConfig, appInstances: number) {
   const p = config.pricing;
-  const row = (resource: string, unit: string, unitCost: number, quantity: number, idle: boolean, note: string): CostRow => ({
-    resource, unit, unitCostPerHour: unitCost, quantity, perHour: round(unitCost * quantity), billedWhileIdle: idle, note,
+  const row = (resource: string, unit: string, unitCost: number, quantity: number, idle: boolean, note: string, perAppServer = false): CostRow => ({
+    resource, unit, unitCostPerHour: unitCost, quantity, perHour: round(unitCost * quantity), billedWhileIdle: idle, note, perAppServer,
   });
+  const queueVms = Math.max(0, p.queueVms);
+  // Only a deployed waiting room is billed (WAITING_ROOM_URL set by Terraform when it exists).
+  const waitingRoom = config.waitingRoom.baseUrl !== null ? [
+    row(`Waiting-room queue VMs (${queueVms} × ${config.queueMachineType})`, 'VM-hour each', p.queueVmPerHour, queueVms, true,
+      'Estimate. Billed 24/7 until destroyed, whether or not the waiting room is enabled for an experiment.'),
+    row('Memorystore for Redis (basic, 1 GB)', 'hour', p.redisPerHour, 1, true,
+      'Estimate. Shared waiting-room state; billed 24/7 until destroyed.'),
+  ] : [];
   const rows = [
     row(`Application VMs (${config.appMachineType})`, 'instance-hour (VM + 10 GB disk)', p.appVmPerHour + p.appDiskPerHour, appInstances, true,
-      'Billed per running VM; the MIG keeps at least the minimum running.'),
+      'Billed per running VM; the MIG keeps at least the minimum running.', true),
     row(`Cloud SQL PostgreSQL (${config.dbTier})`, 'instance-hour incl. storage', p.cloudSqlPerHour, 1, true, 'Billed 24/7 until destroyed.'),
     row('External Application Load Balancer', 'forwarding rule + static IP', p.loadBalancerPerHour + p.lbIpPerHour, 1, true,
       'Billed 24/7 until destroyed, plus data processing per GB.'),
@@ -23,6 +33,7 @@ export function costModel(config: AppConfig, appInstances: number) {
       'Runs idle between experiments.'),
     row('Cloud Run control plane (1 vCPU, always allocated)', 'instance-hour', p.cloudRunPerHour, 1, true,
       'Min one instance so telemetry keeps flowing without a browser open.'),
+    ...waitingRoom,
     row('Firestore, Secret Manager, Artifact Registry, Logging, Monitoring', 'approx.', p.miscPerHour, 1, true,
       'Mostly within free tiers at lab volumes.'),
   ];
@@ -37,7 +48,7 @@ export function costModel(config: AppConfig, appInstances: number) {
     notes: [
       'Estimates from public list prices for europe-west2; not a bill.',
       'Network egress and load-balancer data processing are extra (small for this lab).',
-      'Stopping traffic does not stop billing: Cloud SQL, the load balancer, the generator VM, Cloud Run and the minimum application VMs keep running until `scripts/terraform-destroy.sh`.',
+      `Stopping traffic does not stop billing: Cloud SQL, the load balancer, the generator VM, Cloud Run${waitingRoom.length ? ', the waiting-room VMs and Redis' : ''} and the minimum application VMs keep running until \`scripts/terraform-destroy.sh\`.`,
       'A budget alert notifies; it is not a spending cap.',
     ],
   };

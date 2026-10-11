@@ -71,6 +71,14 @@ export function validateConfig(c: ExperimentConfig, meta: Limits): ValidationRes
     e['tickets.totalInventory'] = 'Total inventory must be at least one ticket per category';
   }
   intRange('tickets.reservationTtlSeconds', t.reservationTtlSeconds, 1, 86400, 'Reservation TTL');
+  // Near-sell-out holds (absent from older configs ⇒ off): 0, or 5..3600 s and never longer than the reservation TTL.
+  const nearTtl = t.nearSelloutTtlSeconds ?? 0;
+  if (!isInt(nearTtl)) e['tickets.nearSelloutTtlSeconds'] = 'Near-sell-out hold must be a whole number of seconds';
+  else if (nearTtl !== 0 && (nearTtl < 5 || nearTtl > 3600)) e['tickets.nearSelloutTtlSeconds'] = 'Near-sell-out hold must be 0 (off) or 5–3600 s';
+  else if (nearTtl > 0 && isInt(t.reservationTtlSeconds) && nearTtl > t.reservationTtlSeconds) {
+    e['tickets.nearSelloutTtlSeconds'] = 'Near-sell-out hold must not be longer than the reservation TTL';
+  }
+  intRange('tickets.nearSelloutThreshold', t.nearSelloutThreshold ?? 0, 0, 1_000_000, 'Near-sell-out threshold');
   intRange('tickets.paymentDelayMinMs', t.paymentDelayMinMs, 0, 60000, 'Minimum payment delay');
   intRange('tickets.paymentDelayMaxMs', t.paymentDelayMaxMs, 0, 60000, 'Maximum payment delay');
   if (isInt(t.paymentDelayMinMs) && isInt(t.paymentDelayMaxMs) && t.paymentDelayMinMs > t.paymentDelayMaxMs) {

@@ -20,7 +20,8 @@ export function defaultExperiment(config: AppConfig): ExperimentConfig {
     servers: { initial: 1, min: 1, max, cpuTarget: config.baseline.cpuTarget, initPeriodSeconds: config.baseline.initPeriodSeconds,
       scaleInWindowSeconds: config.baseline.scaleInWindowSeconds },
     tickets: { eventName: 'Lab Arena Night', totalInventory: 500, categoryCount: 3, pricesCents: [4500, 8000, 15000],
-      reservationTtlSeconds: 120, paymentDelayMinMs: 100, paymentDelayMaxMs: 400, paymentFailureProbability: 0.05 },
+      reservationTtlSeconds: 120, paymentDelayMinMs: 100, paymentDelayMaxMs: 400, paymentFailureProbability: 0.05,
+      nearSelloutTtlSeconds: 0, nearSelloutThreshold: 0 },
     traffic: {
       seed: 42, durationSeconds: 600, maxVUs: 500, totalArrivals: 0, requestTimeoutMs: 10_000,
       pattern: { type: 'ramp_up', startRate: 5, endRate: 100 },
@@ -136,7 +137,7 @@ export function presets(config: AppConfig) {
     {
       id: 'F' as const,
       title: '10,000 customers · 4,000 tickets · adaptive waiting room',
-      description: `10,000 customers arrive in about 2 minutes (84/s) for 4,000 tickets. One ticket per checkout, 30-second holds, 10% checkout abandonment. Starts on 1 VM (max ${flashMax}, CPU target 30%, 60 s scale-in window) with the adaptive waiting room on: one limit per server, learned from the busiest server, starting at 25 (up to 200). Completes 30 s after traffic ends.`,
+      description: `10,000 customers arrive in about 2 minutes (84/s) for 4,000 tickets. One ticket per checkout, 30-second holds (10 s for the last 200 tickets), 10% checkout abandonment. Starts on 1 VM (max ${flashMax}, CPU target 30%, 60 s scale-in window) with the adaptive waiting room on: one limit per server, learned from the busiest server, starting at 25 (up to 200). Completes 30 s after traffic ends; the scale-in that follows is still recorded in the report.`,
       demonstrates: `Adaptive admission control in front of autoscaling: customers beyond what the healthy servers can take wait in a FIFO waiting room instead of overloading them (no 503s). Every second the room adjusts one limit per server from how busy the busiest server really is — requests in flight per PHP worker, requests waiting for a worker and VM CPU — growing while every server has headroom and cutting back as soon as any is overloaded. Capacity is healthy servers × that limit, so each server the autoscaler adds (up to ${flashMax}) raises it as soon as the load balancer marks it healthy. When the 4,000 tickets are gone the room tells everyone still waiting that the event is sold out, without touching the application servers.`,
       config: make((c) => {
         c.name = 'Scenario F – 10,000 customers, 4,000 tickets, adaptive waiting room'; c.preset = 'F';
@@ -144,10 +145,13 @@ export function presets(config: AppConfig) {
         // capped at the maximum of 3).
         // Scale-in window at the minimum (60 s): servers go about a minute after demand drops.
         c.servers = { ...c.servers, initial: 1, min: 1, max: flashMax, cpuTarget: 0.3, scaleInWindowSeconds: QUICK_SCALE_IN_SECONDS };
-        // 30-second holds survive checkout latency on a busy VM; abandoned holds still return mid-sale. The waiting
-        // room declares sold out once availability has stayed 0 for this TTL + 5 s (every hold resolved).
+        // 30-second holds survive checkout latency on a busy VM; abandoned holds still return mid-sale. Near the end the
+        // last 200 tickets are held for 10 s only, so tickets in checkouts abandoned near sell-out go back on sale about
+        // 20 s sooner and the sale finishes sooner. The waiting room declares sold out once availability has stayed 0 for the full
+        // TTL + 5 s (every hold resolved, whichever TTL it got).
         c.tickets = { ...c.tickets, eventName: '10,000 Customer Flash Sale', totalInventory: 4000, categoryCount: 1,
-          pricesCents: [5000], reservationTtlSeconds: 30, paymentDelayMinMs: 100, paymentDelayMaxMs: 250, paymentFailureProbability: 0 };
+          pricesCents: [5000], reservationTtlSeconds: 30, paymentDelayMinMs: 100, paymentDelayMaxMs: 250, paymentFailureProbability: 0,
+          nearSelloutTtlSeconds: 10, nearSelloutThreshold: 200 };
         // A sustained surge: 84 customers/s until the 10,000th arrives (≈ 119 s). The waiting room, not the traffic
         // shape, protects the servers; a waiting customer still occupies a VU, hence 10,000 VUs. durationSeconds is
         // only the safety timeout: long enough for 4,000 tickets to sell and the last abandoned 30 s holds to resolve
@@ -160,13 +164,14 @@ export function presets(config: AppConfig) {
             abandonCheckoutProbability: 0.1, duplicateSubmitProbability: 0, retryPaymentAfterDeclineProbability: 0 },
         };
         // Adaptive admission (docs/waiting-room.md 2a): every healthy server starts at 25 customers in checkout (the
-        // measured fixed value for one n1-standard-1, section 2) and the queue then learns its limit every second from
+        // fixed value measured on one n1-standard-1, section 2; a conservative start on n2-standard-2) and the queue then learns its limit every second from
         // PHP-FPM workers busy, the listen queue and VM CPU — ×1.25 per step in slow start while there is headroom,
         // +1 once steady, ×0.75 on overload — never above 200. Capacity = sum of the healthy servers' limits. An
         // admitted customer who neither buys nor releases frees the slot after 60 s.
         c.waitingRoom = { enabled: true, mode: 'adaptive', activeUsersPerServer: 25, maxUsersPerServer: 200, admissionTtlSeconds: 60 };
-        // Complete 30 s after traffic ends (the last holds expire); the 60 s scale-in window then removes the extra
-        // servers about a minute after demand dropped, whether or not the experiment is still observing.
+        // Complete 30 s after traffic ends (the last holds expire); the scale-in window then removes the extra servers
+        // about a minute after demand dropped. The control plane keeps watching the instance group after completion
+        // (up to 15 min) and adds that scale-in to the report (measured.scaleIn).
         c.cooldownObserveSeconds = 30;
       }),
     },

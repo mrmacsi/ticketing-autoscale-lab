@@ -33,6 +33,9 @@ export function experimentSchema(config: AppConfig) {
       paymentDelayMinMs: int(0, 10_000),
       paymentDelayMaxMs: int(0, 10_000),
       paymentFailureProbability: prob,
+      // Optional with defaults (off) so configs stored before near-sellout holds existed still parse.
+      nearSelloutTtlSeconds: z.number().int().refine((v) => v === 0 || (v >= 5 && v <= 3600), { message: 'Use 0 (off) or 5–3600 seconds' }).default(0),
+      nearSelloutThreshold: int(0, 1_000_000).default(0),
     }),
     traffic: z.object({
       seed: int(0, 2_147_483_647),
@@ -95,6 +98,9 @@ export function validateExperiment(input: unknown, config: AppConfig): Experimen
   if (c.servers.initial < c.servers.min || c.servers.initial > c.servers.max) add('servers.initial', 'Initial count must be between minimum and maximum');
   if (c.tickets.pricesCents.length !== c.tickets.categoryCount) add('tickets.pricesCents', 'Provide one price per category');
   if (c.tickets.totalInventory < c.tickets.categoryCount) add('tickets.totalInventory', 'Need at least one ticket per category');
+  if (c.tickets.nearSelloutTtlSeconds > 0 && c.tickets.nearSelloutTtlSeconds > c.tickets.reservationTtlSeconds) {
+    add('tickets.nearSelloutTtlSeconds', 'The near-sell-out hold must not be longer than the reservation TTL');
+  }
   if (c.tickets.paymentDelayMinMs > c.tickets.paymentDelayMaxMs) add('tickets.paymentDelayMinMs', 'Minimum delay exceeds maximum');
   const mix = c.traffic.mix;
   if (mix.browse + mix.availability + mix.reserve + mix.purchase !== 100) add('traffic.mix', 'Percentages must add up to 100');

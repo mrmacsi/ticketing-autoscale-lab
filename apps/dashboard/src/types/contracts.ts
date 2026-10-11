@@ -147,7 +147,16 @@ export interface TicketConfig {
   paymentDelayMinMs: number;
   paymentDelayMaxMs: number;
   paymentFailureProbability: number;
+  /**
+   * Shorter hold for the last `nearSelloutThreshold` tickets: 0 = off, else 5..3600 s and ≤ reservationTtlSeconds.
+   * Absent from configs stored before it existed (cloneConfig fills in 0).
+   */
+  nearSelloutTtlSeconds: number;
+  /** Remaining tickets at or below which the shorter hold applies (0..1,000,000; 0 = off). */
+  nearSelloutThreshold: number;
 }
+
+export const NEAR_SELLOUT_DEFAULTS = { nearSelloutTtlSeconds: 0, nearSelloutThreshold: 0 } as const;
 
 export interface ExperimentConfig {
   name: string;
@@ -206,11 +215,16 @@ export interface ExperimentSummary {
   createdAt: string;
   trafficStartedAt?: string | null;
   trafficStoppedAt?: string | null;
+  completedAt?: string | null;
   durationSeconds?: number | null;
   peakRps?: number | null;
   maxServers?: number | null;
   ticketsSold?: number | null;
   invariantViolations?: number | null;
+  /** The experiment's servers.min (absent from older control APIs). */
+  minServers?: number | null;
+  /** Scale-in after traffic stopped; null while still observed or not recorded. */
+  scaleIn?: ScaleInReport | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +378,9 @@ export interface WaitingRoomStats {
   soldOutTotal: number;
   /** Dropped from the line for not checking in (closed the page); null from an older queue. */
   abandonedTotal?: number | null;
+  /** Where the line lives and which queue server currently admits customers (absent from an older queue). */
+  store?: 'memory' | 'redis' | null;
+  leaderInstance?: string | null;
   /** Admissions over the last 10 s. */
   admissionRatePerSecond: number;
   /** join → admitted for admitted customers. */
@@ -578,6 +595,8 @@ export interface CostRow {
   perHour: number;
   billedWhileIdle: boolean;
   note: string;
+  /** True only for the application-VM row (scaled by the live VM count); absent from older control APIs. */
+  perAppServer?: boolean;
 }
 
 export interface CostModel {
@@ -643,6 +662,8 @@ export interface Report {
     requestsPerInstance: Record<string, number>;
     /** null when the experiment ran without the waiting room (absent in older reports). */
     waitingRoom?: WaitingRoomReport | null;
+    /** Scale-in after traffic stopped, a later update of the report; null while still observed, absent in older reports. */
+    scaleIn?: ScaleInReport | null;
   };
   configured: {
     cpuTarget: number;
@@ -657,6 +678,24 @@ export interface Report {
   generatorCapacityIssues: string[];
   failures: string[];
   notes: string[];
+}
+
+/**
+ * 'complete': back at servers.min with no VM being deleted; 'timed_out': still above it 15 min after completion;
+ * 'not_needed': never above servers.min; 'unavailable': not observed (no Compute API, or a control-plane restart);
+ * 'superseded': a new experiment or a lab reset ended the observation first.
+ */
+export type ScaleInStatus = 'complete' | 'timed_out' | 'not_needed' | 'unavailable' | 'superseded';
+
+export interface ScaleInReport {
+  status: ScaleInStatus;
+  completedAt: string | null;
+  secondsAfterTrafficStopped: number | null;
+  serversRemoved: number | null;
+  observedUntil: string;
+  /** servers.min the group was expected to return to (absent → read config.servers.min). */
+  targetServers?: number;
+  note?: string;
 }
 
 export interface WaitingRoomReport {

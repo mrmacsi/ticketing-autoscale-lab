@@ -1,19 +1,25 @@
 import { randomBytes } from 'node:crypto';
 import type { AppConfig } from '../config.js';
 import type { AutoscalerPatch, InfraProvider } from '../infra/types.js';
-import { buildReport } from '../report/report.js';
+import { buildReport, scalingTimeline } from '../report/report.js';
 import { ConflictError, type LabStore } from '../store/types.js';
 import type { Collector } from '../telemetry/collector.js';
 import type { TicketingAdmin } from '../ticketing/admin.js';
 import type { InventoryReader } from '../ticketing/inventory.js';
 import { WaitingRoomClient, type WaitingRoomConfig } from '../ticketing/waitingRoom.js';
-import { ACTIVE_STATES, waitingRoomOf, type Experiment, type ExperimentConfig, type ExperimentState, type TimelineEvent } from '../types.js';
+import {
+  ACTIVE_STATES, waitingRoomOf, type Experiment, type ExperimentConfig, type ExperimentState, type ScaleInReport, type ScaleInStatus,
+  type ScalingPoint, type TimelineEvent,
+} from '../types.js';
+import { atMinimum, backAtMinimumSince, SCALE_IN_WATCH_LIMIT_MS, scaleInSummary } from './scaleIn.js';
 import { CATEGORY_NAMES, expensiveReasons, splitInventory, validateExperiment } from './validation.js';
 
 export class StateError extends Error {}
 export class ConfirmationRequiredError extends Error {
   constructor(readonly reasons: string[]) { super('This configuration needs explicit confirmation'); }
 }
+
+interface ScaleInWatch { experimentId: string; min: number; peak: number; trafficStoppedAt: string | null; startedAt: number }
 
 type Logger = { info: (o: object, m: string) => void; warn: (o: object, m: string) => void; error: (o: object, m: string) => void };
 
@@ -41,6 +47,13 @@ export class ExperimentService {
   private busy = false;
   private stopRequestedAt: number | null = null;
   private startRequestedAt: number | null = null;
+  /** Post-completion scale-in observation of the completed current experiment; null when none is running. */
+  private scaleIn: ScaleInWatch | null = null;
+  private scaleInEnding: Promise<void> | null = null;
+  /** Upper bound of the post-completion scale-in observation (shortened in tests). */
+  scaleInLimitMs = SCALE_IN_WATCH_LIMIT_MS;
+  /** Reconciliation period (shortened in tests). */
+  watchIntervalMs = 2000;
 
   constructor(
     private readonly config: AppConfig,
@@ -69,7 +82,8 @@ export class ExperimentService {
         await this.store.releaseLock(id);
       }
     }
-    this.watchTimer = setInterval(() => void this.watch(), 2000);
+    if (!this.current) await this.closeInterruptedScaleIn().catch((error) => this.log.warn({ err: String(error) }, 'could not close scale-in observation'));
+    this.watchTimer = setInterval(() => void this.watch(), this.watchIntervalMs);
   }
 
   stop() { if (this.watchTimer) clearInterval(this.watchTimer); }
@@ -90,6 +104,7 @@ export class ExperimentService {
       const other = await this.store.getExperiment(otherId);
       return Boolean(other && ACTIVE_STATES.includes(other.state));
     });
+    await this.stopScaleInObservation(`new experiment "${config.name}" created`);
     this.setCurrent(experiment);
     await this.event('experiment', 'control_plane', `Experiment "${config.name}" created by ${user}`, 'operator',
       { preset: config.preset, expensiveConfirmed: reasons.length > 0 ? reasons : undefined });
@@ -123,6 +138,9 @@ export class ExperimentService {
       categories: capacities.map((capacity, i) => ({ name: CATEGORY_NAMES[i], price_cents: t.pricesCents[i], capacity })),
       settings: {
         reservation_ttl_seconds: t.reservationTtlSeconds,
+        // Always sent (0 = off) so a previous experiment's near-sell-out hold never carries over.
+        reservation_ttl_near_sellout_seconds: t.nearSelloutTtlSeconds ?? 0,
+        near_sellout_threshold: t.nearSelloutThreshold ?? 0,
         payment_delay_min_ms: t.paymentDelayMinMs,
         payment_delay_max_ms: t.paymentDelayMaxMs,
         payment_failure_probability: t.paymentFailureProbability,
@@ -259,6 +277,7 @@ export class ExperimentService {
 
   /** Abort or forget the current experiment and restore the Terraform baseline. */
   async reset(user: string) {
+    await this.stopScaleInObservation(`lab reset by ${user}`);
     const e = this.current;
     if (e) {
       if (e.state === 'running' || e.state === 'stopping') {
@@ -277,7 +296,13 @@ export class ExperimentService {
 
   /** Periodic reconciliation with the generator's reports and the cool-down timer. */
   private async watch() {
-    if (this.busy || !this.current || !ACTIVE_STATES.includes(this.current.state)) return;
+    if (this.busy) return;
+    if (this.scaleIn) {
+      this.busy = true;
+      try { await this.checkScaleIn(); } catch (error) { this.log.warn({ err: String(error) }, 'scale-in watch failed'); } finally { this.busy = false; }
+      return;
+    }
+    if (!this.current || !ACTIVE_STATES.includes(this.current.state)) return;
     this.busy = true;
     try {
       const fresh = await this.store.getExperiment(this.current.id);
@@ -322,6 +347,8 @@ export class ExperimentService {
   private async finish(reason: string) {
     const e = this.current!;
     await this.event('experiment', 'control_plane', reason);
+    // Keep recording the instance group across completion, so the scale-in that follows is observed without a gap.
+    if (this.infra.available) this.collector.observeScaleIn(true);
     await this.collector.flushSeries();
     let finalInventory = null;
     if (e.eventId && this.inventory.available) {
@@ -336,9 +363,132 @@ export class ExperimentService {
       this.store.listTrafficBuckets(e.id), this.store.readSeries(e.id), this.store.listEvents(e.id),
     ]);
     const report = buildReport({ experiment: { ...this.current!, completedAt }, buckets, series, events, finalInventory }, this.config);
+    const scaleIn = this.scaleInAtCompletion(this.current!, series.scaling);
+    report.measured.scaleIn = 'result' in scaleIn ? scaleIn.result : null;
     await this.patch({ report });
     // The completed experiment stays visible until the next one is created or the lab is reset.
     await this.store.releaseLock(e.id);
+    if ('result' in scaleIn) {
+      this.collector.observeScaleIn(false);
+      return;
+    }
+    // Started only once the report is stored: the observation's result is a later update of it.
+    this.scaleIn = scaleIn.watch;
+    const now = this.collector.currentMig?.actualCount;
+    await this.event('experiment', 'control_plane',
+      `Watching the instance group after completion until it is back at ${scaleIn.watch.min} server${scaleIn.watch.min === 1 ? '' : 's'} `
+      + `(${now ?? 'unknown'} now, at most ${Math.round(this.scaleInLimitMs / 60_000)} min)`);
+  }
+
+  // ---- scale-in after completion -------------------------------------------------------------
+
+  /**
+   * Decides the scale-in outcome at completion when it is already known (no Compute API, never scaled out, or
+   * already back at the minimum); otherwise returns the post-completion observation to start.
+   */
+  private scaleInAtCompletion(e: Experiment, scaling: ScalingPoint[]): { result: ScaleInReport } | { watch: ScaleInWatch } {
+    const min = e.config.servers.min;
+    const base = { targetServers: min, observedUntil: new Date().toISOString(), completedAt: null, secondsAfterTrafficStopped: null };
+    if (!this.infra.available) {
+      return { result: { ...base, status: 'unavailable', serversRemoved: null, note: 'Compute API not available (local mode)' } };
+    }
+    const mig = this.collector.currentMig;
+    if (!mig && !scaling.length) return { result: { ...base, status: 'unavailable', serversRemoved: null, note: 'the instance group was never observed' } };
+    const peak = Math.max(0, ...scaling.map((p) => p.actual), mig?.actualCount ?? 0);
+    if (peak <= min) return { result: { ...base, status: 'not_needed', serversRemoved: 0 } };
+    if (mig && atMinimum(mig, this.collector.instanceViews(), min)) {
+      // Already scaled in while cooling down: the recorded observations say since when.
+      const from = Date.parse(e.trafficStoppedAt ?? e.trafficStartedAt ?? e.createdAt);
+      const backAt = backAtMinimumSince(scaling, min, from) ?? Date.parse(mig.observedAt);
+      return { result: this.scaleInResult('complete', min, peak, e.trafficStoppedAt, backAt) };
+    }
+    return { watch: { experimentId: e.id, min, peak, trafficStoppedAt: e.trafficStoppedAt, startedAt: Date.now() } };
+  }
+
+  private scaleInResult(status: ScaleInStatus, min: number, peak: number, trafficStoppedAt: string | null, backAt?: number, note?: string): ScaleInReport {
+    const mig = this.collector.currentMig;
+    return {
+      status,
+      completedAt: backAt !== undefined ? new Date(backAt).toISOString() : null,
+      secondsAfterTrafficStopped: backAt !== undefined && trafficStoppedAt ? Math.max(0, Math.round((backAt - Date.parse(trafficStoppedAt)) / 1000)) : null,
+      serversRemoved: mig ? Math.max(0, peak - mig.actualCount) : null,
+      observedUntil: new Date().toISOString(),
+      targetServers: min,
+      ...(note ? { note } : {}),
+    };
+  }
+
+  private async checkScaleIn() {
+    const w = this.scaleIn!;
+    if (this.current?.id !== w.experimentId) {
+      await this.endScaleIn('superseded', undefined, 'another experiment became current');
+      return;
+    }
+    const mig = this.collector.currentMig;
+    if (mig) {
+      w.peak = Math.max(w.peak, mig.actualCount);
+      if (atMinimum(mig, this.collector.instanceViews(), w.min)) {
+        await this.endScaleIn('complete', Date.parse(mig.observedAt));
+        return;
+      }
+    }
+    if (Date.now() - w.startedAt >= this.scaleInLimitMs) {
+      await this.endScaleIn('timed_out', undefined, `limit of ${Math.round(this.scaleInLimitMs / 60_000)} min after completion reached`);
+    }
+  }
+
+  /** Ends a running post-completion observation (or waits for one that is ending) before the lab moves on. */
+  private async stopScaleInObservation(why: string) {
+    if (this.scaleIn) await this.endScaleIn('superseded', undefined, why);
+    else if (this.scaleInEnding) await this.scaleInEnding;
+  }
+
+  private endScaleIn(status: ScaleInStatus, backAt?: number, note?: string): Promise<void> {
+    const w = this.scaleIn;
+    if (!w) return this.scaleInEnding ?? Promise.resolve();
+    this.scaleIn = null;
+    const result = this.scaleInResult(status, w.min, w.peak, w.trafficStoppedAt, backAt, note);
+    this.scaleInEnding = (async () => {
+      try {
+        await this.collector.recordEvent(this.collector.detectorForExperiment.event('scaling', 'control_plane',
+          `Scale-in after completion: ${scaleInSummary(result)}`, null, { ...result, afterCompletion: true }), w.experimentId);
+        if (this.collector.observingScaleIn) {
+          this.collector.observeScaleIn(false);
+          await this.collector.flushSeries(w.experimentId);
+        }
+        await this.storeScaleIn(w.experimentId, result);
+      } catch (error) {
+        this.log.warn({ experiment: w.experimentId, err: String(error) }, 'could not record the scale-in result');
+      } finally {
+        this.scaleInEnding = null;
+      }
+    })();
+    return this.scaleInEnding;
+  }
+
+  /** Later update of the stored report: the scale-in result plus the timeline events observed after completion. */
+  private async storeScaleIn(id: string, scaleIn: ScaleInReport) {
+    const stored = await this.store.getExperiment(id);
+    if (!stored?.report) return;
+    const report = {
+      ...stored.report,
+      measured: { ...stored.report.measured, scaleIn },
+      scalingTimeline: scalingTimeline(await this.store.listEvents(id)),
+    };
+    if (this.current?.id === id) await this.patch({ report });
+    else await this.store.updateExperiment(id, { report });
+  }
+
+  /** After a restart no observation is running: close one the previous process left open on the latest report. */
+  private async closeInterruptedScaleIn() {
+    const [latest] = await this.store.listExperiments(1);
+    const report = latest?.report;
+    if (!latest || latest.state !== 'completed' || !report || report.measured.scaleIn != null || !latest.completedAt) return;
+    if (Date.now() - Date.parse(latest.completedAt) > this.scaleInLimitMs) return;
+    await this.store.updateExperiment(latest.id, { report: { ...report, measured: { ...report.measured, scaleIn: {
+      status: 'unavailable', completedAt: null, secondsAfterTrafficStopped: null, serversRemoved: null, observedUntil: new Date().toISOString(),
+      targetServers: latest.config.servers.min, note: 'the control plane restarted while the scale-in was being observed',
+    } } } });
   }
 
   private async fail(reason: string) {

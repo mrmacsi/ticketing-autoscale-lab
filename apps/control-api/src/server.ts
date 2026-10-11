@@ -107,13 +107,16 @@ export function buildServer({ config, auth, store, collector, experiments }: Ser
     const list = await store.listExperiments(100);
     return list.map((e) => ({
       id: e.id, name: e.name, preset: e.config.preset, state: e.state, createdAt: e.createdAt,
-      trafficStartedAt: e.trafficStartedAt, trafficStoppedAt: e.trafficStoppedAt,
+      trafficStartedAt: e.trafficStartedAt, trafficStoppedAt: e.trafficStoppedAt, completedAt: e.completedAt,
       durationSeconds: e.trafficStartedAt && e.trafficStoppedAt
         ? Math.round((Date.parse(e.trafficStoppedAt) - Date.parse(e.trafficStartedAt)) / 1000) : null,
       peakRps: e.report?.measured.peakRps ?? null,
       maxServers: e.report?.measured.maxObservedServerCount ?? null,
       ticketsSold: e.report?.measured.ticketsSold ?? null,
       invariantViolations: e.report?.measured.invariantViolations ?? null,
+      minServers: e.config.servers.min,
+      // null while the scale-in after completion is still observed (and for reports older than it).
+      scaleIn: e.report?.measured.scaleIn ?? null,
     }));
   });
 

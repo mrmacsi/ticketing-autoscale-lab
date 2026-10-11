@@ -1,12 +1,13 @@
 import type { CostModel, CostRow } from '@/types/contracts';
 
 /**
- * Cost rows whose unit mentions "instance" are treated as per-app-server rows and scaled by
- * the live instance count; every other row contributes its fixed `perHour`. Rows that are not
- * billed while idle (e.g. the load-generator VM) only count while an experiment is active.
+ * The application-VM row (`perAppServer`) is scaled by the live instance count; every other row
+ * (Cloud SQL, load balancer, generator, waiting-room VMs, Redis, …) contributes its fixed `perHour`.
+ * Rows that are not billed while idle only count while an experiment is active. Older control APIs
+ * send no `perAppServer`: their per-VM row is the one whose unit starts with "instance-hour (VM".
  */
 export function isPerInstanceRow(row: CostRow): boolean {
-  return /instance/i.test(row.unit);
+  return row.perAppServer ?? /^instance-hour \(VM/i.test(row.unit);
 }
 
 export interface CostEstimate {

@@ -116,6 +116,8 @@ export function normalizeStats(raw: unknown): WaitingRoomStats {
     expiredTotal: num(r.expiredTotal),
     soldOutTotal: num(r.soldOutTotal),
     abandonedTotal: numOrNull(r.abandonedTotal),
+    store: oneOf<'memory' | 'redis'>(r.store, ['memory', 'redis']),
+    leaderInstance: typeof r.leaderInstance === 'string' && r.leaderInstance ? r.leaderInstance : null,
     admissionRatePerSecond: num(r.admissionRatePerSecond),
     waitMs: { p50: numOrNull(wait.p50), p95: numOrNull(wait.p95), max: numOrNull(wait.max), count: num(wait.count) },
     oldestWaitingSeconds: numOrNull(r.oldestWaitingSeconds),

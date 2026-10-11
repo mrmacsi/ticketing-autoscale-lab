@@ -18,6 +18,10 @@ export interface ReportInput {
   finalInventory: InventoryView | null;
 }
 
+/** Timeline kinds copied into the report's scalingTimeline. */
+export const SCALING_TIMELINE_KINDS: ReadonlyArray<TimelineEvent['kind']> = ['scaling', 'instance', 'health', 'cpu', 'waiting_room'];
+export const scalingTimeline = (events: TimelineEvent[]) => events.filter((ev) => SCALING_TIMELINE_KINDS.includes(ev.kind));
+
 /** Builds the end-of-experiment report from persisted measurements only. */
 export function buildReport(input: ReportInput, config: AppConfig): Report {
   const { experiment: e, buckets, series, events, finalInventory } = input;
@@ -97,6 +101,9 @@ export function buildReport(input: ReportInput, config: AppConfig): Report {
         expiredDuringCheckout: sumBusiness('expiredDuringCheckout') },
       requestsPerInstance,
       waitingRoom: waitingRoomReport(e, buckets, series.waitingRoom ?? []),
+      // Filled in by the experiment service: at completion when already decided, otherwise when the post-completion
+      // scale-in observation ends (null until then).
+      scaleIn: null,
     },
     configured: {
       cpuTarget: c.servers.cpuTarget, minReplicas: c.servers.min, maxReplicas: c.servers.max, initialServers: c.servers.initial,
@@ -107,7 +114,7 @@ export function buildReport(input: ReportInput, config: AppConfig): Report {
       infrastructureCostUsd: estimateExperimentCost(config, maxObserved ?? c.servers.max, durationSeconds),
       note: 'Upper-bound list-price estimate for the whole lab during this experiment window (all resources, max observed servers).',
     },
-    scalingTimeline: events.filter((ev) => ['scaling', 'instance', 'health', 'cpu', 'waiting_room'].includes(ev.kind)),
+    scalingTimeline: scalingTimeline(events),
     generatorCapacityIssues: capacityIssues,
     failures,
     notes: [

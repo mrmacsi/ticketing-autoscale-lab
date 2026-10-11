@@ -58,7 +58,7 @@ export function roomStats(overrides: Partial<WaitingRoomStats> = {}): WaitingRoo
     waiting: 0, active: 0, capacity: 25, healthyServers: 1, servers: [roomServer('app-1')],
     activeUsersPerServer: 25,
     admissionMode: null, adaptive: null,
-    joinedTotal: 0, admittedTotal: 0, releasedTotal: 0, expiredTotal: 0, soldOutTotal: 0, abandonedTotal: 0,
+    joinedTotal: 0, admittedTotal: 0, releasedTotal: 0, expiredTotal: 0, soldOutTotal: 0, abandonedTotal: 0, store: 'memory', leaderInstance: null,
     admissionRatePerSecond: 0,
     waitMs: { p50: null, p95: null, max: null, count: 0 },
     oldestWaitingSeconds: null,

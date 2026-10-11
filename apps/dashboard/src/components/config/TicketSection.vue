@@ -9,6 +9,12 @@ const draft = useDraft();
 const t = computed(() => draft.config.value!.tickets);
 const err = draft.fieldError;
 const nameId = useId();
+const nearSelloutHint = computed(() => {
+  const ttl = t.value.nearSelloutTtlSeconds;
+  const n = t.value.nearSelloutThreshold;
+  if (!ttl || !n) return 'off';
+  return `last ${n.toLocaleString('en-US')} tickets held ${ttl} s`;
+});
 
 function setCategoryCount(n: number) {
   t.value.categoryCount = n;
@@ -29,6 +35,27 @@ function setCategoryCount(n: number) {
       <NumField v-model="t.totalInventory" label="Total inventory" description="Total tickets available across all categories when the event is created. Smaller inventory sells out sooner and makes contention easier to observe." :min="1" :max="maxInventory" :error="err('tickets.totalInventory')" :hint="`max ${maxInventory.toLocaleString('en-US')}`" />
       <NumField :model-value="t.categoryCount" label="Categories" description="Number of ticket categories to create, from 1 to 10. Inventory is split across them, and each category gets its own simulated price." :min="1" :max="10" :error="err('tickets.categoryCount')" @update:model-value="setCategoryCount" />
       <NumField v-model="t.reservationTtlSeconds" label="Reservation TTL" description="Seconds a ticket hold lasts before it expires. Customers who do not pay in time lose the hold, returning those tickets to available inventory." suffix="s" :min="1" :error="err('tickets.reservationTtlSeconds')" />
+    </div>
+    <div class="grid grid-cols-1 gap-3 @md:grid-cols-2" data-testid="near-sellout">
+      <NumField
+        v-model="t.nearSelloutTtlSeconds"
+        label="Near-sell-out hold"
+        description="Shorter holds for the last N tickets (N = the threshold), so abandoned checkouts near the end return them faster. 0 turns it off; otherwise 5–3600 s and no longer than the reservation TTL."
+        suffix="s"
+        :min="0"
+        :max="3600"
+        :error="err('tickets.nearSelloutTtlSeconds')"
+        :hint="nearSelloutHint"
+      />
+      <NumField
+        v-model="t.nearSelloutThreshold"
+        label="Near-sell-out threshold"
+        description="How many remaining tickets count as near sell-out: once available tickets drop to this number, new holds use the near-sell-out hold instead of the reservation TTL. 0 turns it off."
+        suffix="tickets"
+        :min="0"
+        :max="1000000"
+        :error="err('tickets.nearSelloutThreshold')"
+      />
     </div>
     <div>
       <div class="label">Simulated prices per category (no real payments)</div>

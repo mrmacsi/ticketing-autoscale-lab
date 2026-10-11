@@ -7,13 +7,14 @@ import { MemoryStore } from '../src/store/memory.js';
 import { Collector } from '../src/telemetry/collector.js';
 import { TicketingAdmin } from '../src/ticketing/admin.js';
 import { InventoryReader } from '../src/ticketing/inventory.js';
+import { defaultExperiment } from '../src/experiments/presets.js';
+import type { Experiment, Report, ScaleInReport } from '../src/types.js';
 import { testConfig } from './fakes.js';
 
 const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
 
-function server(env: Record<string, string>, onCloudRun = false) {
+function server(env: Record<string, string>, onCloudRun = false, store = new MemoryStore()) {
   const config = testConfig(env);
-  const store = new MemoryStore();
   const infra = new UnavailableInfra();
   const collector = new Collector(config, infra, store, new InventoryReader(null), quiet);
   const experiments = new ExperimentService(config, store, infra, collector, new TicketingAdmin('', () => null), new InventoryReader(null), quiet);
@@ -68,6 +69,21 @@ describe('state endpoint', () => {
     expect(meta.waitingRoom).toEqual({ deployed: true });
     expect(meta.presets.find((p: { id: string }) => p.id === 'F').config.waitingRoom.enabled).toBe(true);
     expect(meta.defaults.waitingRoom.enabled).toBe(false);
+  });
+
+  it('lists the scale-in after completion in the history', async () => {
+    const store = new MemoryStore();
+    const config = defaultExperiment(testConfig({ AUTH_MODE: 'dev' }));
+    const scaleIn: ScaleInReport = { status: 'complete', completedAt: '2026-10-11T12:06:04.000Z', secondsAfterTrafficStopped: 64,
+      serversRemoved: 2, observedUntil: '2026-10-11T12:06:05.000Z', targetServers: 1 };
+    const base: Experiment = { id: 'exp_a', name: 'a', state: 'completed', config, createdBy: 'me', createdAt: '2026-10-11T12:00:00.000Z',
+      readyAt: null, trafficStartedAt: null, trafficStoppedAt: null, completedAt: null, failedReason: null, eventId: null, categories: [],
+      generator: null, initialServerCount: 1, report: { measured: { scaleIn } } as unknown as Report };
+    store.experiments.set('exp_a', base);
+    store.experiments.set('exp_b', { ...base, id: 'exp_b', createdAt: '2026-10-11T11:00:00.000Z', report: null });
+    const rows = (await server({ AUTH_MODE: 'dev' }, false, store).inject('/api/experiments')).json();
+    expect(rows[0]).toMatchObject({ id: 'exp_a', minServers: 1, scaleIn });
+    expect(rows[1]).toMatchObject({ id: 'exp_b', minServers: 1, scaleIn: null });
   });
 
   it('returns validation details for bad experiment configs', async () => {

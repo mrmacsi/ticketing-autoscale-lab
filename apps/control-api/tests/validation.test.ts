@@ -21,6 +21,9 @@ describe('experiment validation', () => {
     expect(c.preset).toBe('F');
     expect(c.tickets.totalInventory).toBe(4000);
     expect(c.tickets.reservationTtlSeconds).toBe(30);
+    // The last 200 tickets are held for 10 s, so abandoned checkouts near sell-out return them sooner.
+    expect(c.tickets).toMatchObject({ nearSelloutTtlSeconds: 10, nearSelloutThreshold: 200 });
+    expect(sale.description).toMatch(/10 s for the last 200 tickets/);
     expect(c.tickets.categoryCount).toBe(1);
     expect(c.traffic.mix).toEqual({ browse: 0, availability: 0, reserve: 0, purchase: 100 });
     expect(c.traffic.totalArrivals).toBe(10_000);
@@ -96,6 +99,29 @@ describe('experiment validation', () => {
     expect(Object.keys(bad)).toEqual(expect.arrayContaining(['waitingRoom.activeUsersPerServer', 'waitingRoom.admissionTtlSeconds']));
     expect(Object.keys(errorsOf({ ...c, waitingRoom: { enabled: true, activeUsersPerServer: 1001, admissionTtlSeconds: 3601 } })))
       .toEqual(expect.arrayContaining(['waitingRoom.activeUsersPerServer', 'waitingRoom.admissionTtlSeconds']));
+  });
+
+  it('turns near-sell-out holds off in every preset except F and for configs stored before they existed', () => {
+    for (const p of presets(config).filter((x) => x.id !== 'F')) {
+      expect(p.config.tickets, p.id).toMatchObject({ nearSelloutTtlSeconds: 0, nearSelloutThreshold: 0 });
+    }
+    const c = defaultExperiment(config);
+    const { nearSelloutTtlSeconds: _t, nearSelloutThreshold: _n, ...oldTickets } = c.tickets;
+    expect(validateExperiment({ ...c, tickets: oldTickets }, config).tickets).toMatchObject({ nearSelloutTtlSeconds: 0, nearSelloutThreshold: 0 });
+  });
+
+  it('range-checks near-sell-out holds: 0 or 5–3600 s, never longer than the reservation TTL', () => {
+    const c = defaultExperiment(config);   // reservation TTL 120 s
+    const tickets = (o: object) => ({ ...c, tickets: { ...c.tickets, ...o } });
+    expect(errorsOf(tickets({ nearSelloutTtlSeconds: 0, nearSelloutThreshold: 0 }))).toEqual({});
+    expect(errorsOf(tickets({ nearSelloutTtlSeconds: 5, nearSelloutThreshold: 1_000_000 }))).toEqual({});
+    expect(errorsOf(tickets({ nearSelloutTtlSeconds: 120, nearSelloutThreshold: 50 }))).toEqual({});
+    expect(Object.keys(errorsOf(tickets({ nearSelloutTtlSeconds: 4 })))).toEqual(['tickets.nearSelloutTtlSeconds']);
+    expect(Object.keys(errorsOf(tickets({ nearSelloutTtlSeconds: 3601 })))).toContain('tickets.nearSelloutTtlSeconds');
+    expect(Object.keys(errorsOf(tickets({ nearSelloutTtlSeconds: 7.5 })))).toEqual(['tickets.nearSelloutTtlSeconds']);
+    expect(errorsOf(tickets({ nearSelloutTtlSeconds: 121 }))['tickets.nearSelloutTtlSeconds']).toMatch(/not be longer than the reservation TTL/);
+    expect(Object.keys(errorsOf(tickets({ nearSelloutThreshold: -1 })))).toEqual(['tickets.nearSelloutThreshold']);
+    expect(Object.keys(errorsOf(tickets({ nearSelloutThreshold: 1_000_001 })))).toEqual(['tickets.nearSelloutThreshold']);
   });
 
   it('defaults the admission mode for waiting-room settings stored before adaptive admission', () => {

@@ -2,13 +2,14 @@ import { computed, inject, reactive, ref, watch, type InjectionKey } from 'vue';
 import type { FieldIssue } from '@/api/client';
 import { buildRateProfile } from '@/lib/rateProfile';
 import { validateConfig } from '@/lib/validation';
-import { DEFAULT_WAITING_ROOM, type ExperimentConfig, type Preset } from '@/types/contracts';
+import { DEFAULT_WAITING_ROOM, NEAR_SELLOUT_DEFAULTS, type ExperimentConfig, type Preset } from '@/types/contracts';
 import type { LabStore } from './lab';
 
-/** Deep copy; a config without waiting-room settings (older control API) gets the disabled defaults. */
+/** Deep copy; settings missing from an older control API's config get their disabled defaults. */
 export function cloneConfig(c: ExperimentConfig): ExperimentConfig {
   const copy = JSON.parse(JSON.stringify(c)) as ExperimentConfig;
   copy.waitingRoom = { ...DEFAULT_WAITING_ROOM, ...(copy.waitingRoom ?? {}) };
+  copy.tickets = { ...NEAR_SELLOUT_DEFAULTS, ...copy.tickets };
   return copy;
 }
 

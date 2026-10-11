@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { defaultExperiment, presets } from '../src/experiments/presets.js';
 import { ExperimentService } from '../src/experiments/service.js';
+import { UnavailableInfra } from '../src/infra/types.js';
 import { MemoryStore } from '../src/store/memory.js';
 import { Collector } from '../src/telemetry/collector.js';
 import { TicketingAdmin } from '../src/ticketing/admin.js';
@@ -40,6 +41,7 @@ describe('ExperimentService lifecycle', () => {
     collector = new Collector(config, infra, store, new InventoryReader(null), quiet);
     admin = new FakeAdmin();
     service = new ExperimentService(config, store, infra, collector, admin, new InventoryReader(null), quiet, () => new Promise((r) => setTimeout(r, 10)));
+    service.watchIntervalMs = 100;
     collector.start();
     await service.init();
     await until(() => collector.currentMig !== null);
@@ -100,6 +102,109 @@ describe('ExperimentService lifecycle', () => {
     await until(() => service.experiment?.state === 'completed', 3000);
     const events = await store.listEvents(e.id);
     expect(events.some((ev) => ev.message.includes('No more servers needed'))).toBe(true);
+    // Scaled in before completion: decided at completion from the recorded observations, no further watch.
+    const scaleIn = (await store.getExperiment(e.id))?.report?.measured.scaleIn;
+    expect(scaleIn).toMatchObject({ status: 'complete', serversRemoved: 2, targetServers: 1 });
+    expect(scaleIn?.secondsAfterTrafficStopped).toBeGreaterThanOrEqual(40);
+    expect(events.some((ev) => ev.message.startsWith('Watching the instance group'))).toBe(false);
+  });
+
+  describe('scale-in after completion', () => {
+    const scaleOut = async () => {
+      infra.targetSize = 3;
+      infra.instances.push({ name: 'app-2', id: '2', instanceStatus: 'RUNNING', currentAction: 'NONE', migHealth: 'HEALTHY' },
+        { name: 'app-3', id: '3', instanceStatus: 'RUNNING', currentAction: 'NONE', migHealth: 'HEALTHY' });
+      await until(() => collector.currentMig?.actualCount === 3);
+      await new Promise((r) => setTimeout(r, 60));   // a few recorded scaling points at 3 servers
+    };
+    /** Runs a default experiment (min 1, no cool-down) to completion, 5 s after traffic stopped. */
+    const complete = async (scaledOut: boolean) => {
+      const e = await service.create({ ...defaultExperiment(config), cooldownObserveSeconds: 0 }, 'me');
+      await until(() => service.experiment?.state === 'ready');
+      heartbeat();
+      await service.start(e.id, 'me');
+      if (scaledOut) await scaleOut();
+      const stoppedAt = Date.now() - 5_000;
+      store.setGenerator(e.id, { state: 'finished', finishReason: 'completed', finishedAt: new Date(stoppedAt).toISOString() });
+      await until(() => service.experiment?.state === 'completed', 6000);
+      return { id: e.id, stoppedAt };
+    };
+    const scaleInOf = async (id: string) => (await store.getExperiment(id))?.report?.measured.scaleIn;
+
+    it('keeps watching until the group is back at the minimum and adds the scale-in to the report', async () => {
+      const { id, stoppedAt } = await complete(true);
+      expect(await scaleInOf(id)).toBeNull();   // the report is generated at completion; scale-in is a later update
+      expect((await store.listEvents(id)).some((ev) => ev.message.startsWith('Watching the instance group after completion'))).toBe(true);
+      // The autoscaler removes the extra servers after completion; still deleting: keep watching.
+      infra.targetSize = 1;
+      infra.instances[1].currentAction = 'DELETING';
+      infra.instances[2].currentAction = 'DELETING';
+      await until(() => collector.instanceViews().filter((i) => i.phase === 'terminating').length === 2);
+      await new Promise((r) => setTimeout(r, 300));   // several watch passes with VMs still deleting
+      expect(await scaleInOf(id)).toBeNull();
+      const removedAt = Date.now();
+      infra.instances.splice(1, 2);
+      await until(() => service.experiment?.report?.measured.scaleIn != null, 4000);
+
+      const scaleIn = await scaleInOf(id);
+      expect(scaleIn).toMatchObject({ status: 'complete', serversRemoved: 2, targetServers: 1 });
+      expect(Date.parse(scaleIn!.completedAt!)).toBeGreaterThanOrEqual(removedAt);
+      expect(scaleIn!.secondsAfterTrafficStopped).toBe(Math.round((Date.parse(scaleIn!.completedAt!) - stoppedAt) / 1000));
+      expect(scaleIn!.secondsAfterTrafficStopped).toBeGreaterThanOrEqual(5);
+
+      // Real observations only, with attribution, appended to the completed experiment's timeline and report.
+      const events = await store.listEvents(id);
+      const after = events.filter((ev) => ev.data?.afterCompletion === true);
+      expect(after.find((ev) => ev.message === 'Autoscaler decreased MIG target size 3 → 1')).toMatchObject({ kind: 'scaling', attribution: 'autoscaler' });
+      expect(after.filter((ev) => /termination started/.test(ev.message)).map((ev) => ev.attribution)).toEqual(['autoscaler', 'autoscaler']);
+      expect(after.filter((ev) => /removed from the MIG/.test(ev.message))).toHaveLength(2);
+      expect(after.at(-1)?.message).toMatch(/^Scale-in after completion: Back to 1 server \d+ s after traffic stopped \(2 removed\)$/);
+      const report = (await store.getExperiment(id))!.report!;
+      expect(report.scalingTimeline.some((ev) => ev.message === 'Autoscaler decreased MIG target size 3 → 1')).toBe(true);
+      expect(report.measured.maxObservedServerCount).toBe(3);   // the rest of the report is unchanged
+      expect((await store.readSeries(id)).scaling.at(-1)).toMatchObject({ actual: 1, target: 1 });
+
+      // Observation over: nothing more is recorded for the completed experiment.
+      const count = (await store.listEvents(id)).length;
+      infra.targetSize = 2;
+      infra.instances.push({ name: 'app-4', id: '4', instanceStatus: 'RUNNING', currentAction: 'NONE', migHealth: 'HEALTHY' });
+      await new Promise((r) => setTimeout(r, 200));
+      expect((await store.listEvents(id)).length).toBe(count);
+    });
+
+    it('gives up after the limit and records that it timed out', async () => {
+      service.scaleInLimitMs = 200;
+      const { id } = await complete(true);
+      await until(() => service.experiment?.report?.measured.scaleIn != null, 4000);
+      expect(await scaleInOf(id)).toMatchObject({ status: 'timed_out', completedAt: null, secondsAfterTrafficStopped: null, serversRemoved: 0 });
+      const last = (await store.listEvents(id)).at(-1);
+      expect(last?.message).toMatch(/^Scale-in after completion: Still above 1 server when the observation ended/);
+    });
+
+    it('stops watching when a new experiment is created', async () => {
+      const { id } = await complete(true);
+      const next = await service.create(defaultExperiment(config), 'me');
+      expect(await scaleInOf(id)).toMatchObject({ status: 'superseded', completedAt: null, note: expect.stringMatching(/new experiment/) });
+      expect((await store.listEvents(id)).at(-1)?.message).toMatch(/^Scale-in after completion: Observation stopped/);
+      // The new experiment's timeline only has its own events.
+      infra.targetSize = 1;
+      infra.instances.splice(1, 2);
+      await until(() => service.experiment?.state === 'ready');
+      expect((await store.listEvents(next.id)).some((ev) => ev.data?.afterCompletion)).toBe(false);
+      expect((await scaleInOf(id))?.status).toBe('superseded');
+    });
+
+    it('stops watching when the lab is reset', async () => {
+      const { id } = await complete(true);
+      await service.reset('me');
+      expect(await scaleInOf(id)).toMatchObject({ status: 'superseded', note: 'lab reset by me' });
+    });
+
+    it('is not needed when the group never scaled out', async () => {
+      const { id } = await complete(false);
+      expect(await scaleInOf(id)).toMatchObject({ status: 'not_needed', serversRemoved: 0, completedAt: null, targetServers: 1 });
+      expect((await store.listEvents(id)).some((ev) => ev.message.startsWith('Watching the instance group'))).toBe(false);
+    });
   });
 
   it('refuses a second experiment while one is active', async () => {
@@ -155,6 +260,8 @@ describe('ExperimentService lifecycle', () => {
     const e = await service.create(defaultExperiment(config), 'me');
     await until(() => service.experiment?.state === 'ready');
     expect(admin.prepared[0].settings.waiting_room_required).toBe(false);
+    // Near-sell-out holds are off by default, and always sent so a previous experiment's value never carries over.
+    expect(admin.prepared[0].settings).toMatchObject({ reservation_ttl_near_sellout_seconds: 0, near_sellout_threshold: 0 });
     heartbeat();
     await service.start(e.id, 'me');
     expect(store.commands.at(-1)?.config?.waitingRoom).toEqual({ enabled: false });
@@ -162,6 +269,51 @@ describe('ExperimentService lifecycle', () => {
     expect(collector.snapshot().freshness.waitingRoom).toMatchObject({ status: 'missing', note: expect.stringMatching(/not deployed/) });
     await service.reset('me');
     expect(admin.settings.at(-1)).toEqual({ waiting_room_required: false });
+  });
+});
+
+describe('ExperimentService without the Compute API (local)', () => {
+  it('completes with the scale-in marked unavailable', async () => {
+    const config = testConfig({ TICK_MS: '50', TICKETING_ADMIN_URL: 'http://localhost:8080' });
+    const store = new MemoryStore();
+    const infra = new UnavailableInfra();
+    const collector = new Collector(config, infra, store, new InventoryReader(null), quiet);
+    const service = new ExperimentService(config, store, infra, collector, new FakeAdmin(), new InventoryReader(null), quiet,
+      () => new Promise((r) => setTimeout(r, 10)));
+    service.watchIntervalMs = 100;
+    collector.start();
+    await service.init();
+    try {
+      const e = await service.create({ ...defaultExperiment(config), cooldownObserveSeconds: 0 }, 'me');
+      await until(() => service.experiment?.state === 'ready');
+      store.status = { agentId: 'gen', state: 'idle', experimentId: null, lastCommandSeq: 0, heartbeatAt: new Date().toISOString(), runStartedAt: null,
+        message: null, version: '1', limits: null, targetBaseUrl: null };
+      await service.start(e.id, 'me');
+      store.setGenerator(e.id, { state: 'finished', finishReason: 'completed', finishedAt: new Date(Date.now() - 5_000).toISOString() });
+      await until(() => service.experiment?.state === 'completed', 6000);
+      expect((await store.getExperiment(e.id))?.report?.measured.scaleIn)
+        .toMatchObject({ status: 'unavailable', completedAt: null, serversRemoved: null, note: expect.stringMatching(/local mode/) });
+    } finally {
+      service.stop();
+      collector.stop();
+    }
+  });
+
+  it('closes an observation a restart interrupted', async () => {
+    const config = testConfig();
+    const store = new MemoryStore();
+    const base = defaultExperiment(config);
+    const completedAt = new Date(Date.now() - 60_000).toISOString();
+    const report = { measured: { scaleIn: null } } as unknown as NonNullable<Parameters<MemoryStore['updateExperiment']>[1]['report']>;
+    store.experiments.set('exp_old', { id: 'exp_old', name: 'old', state: 'completed', config: base, createdBy: 'me', createdAt: completedAt,
+      readyAt: null, trafficStartedAt: null, trafficStoppedAt: null, completedAt, failedReason: null, eventId: null, categories: [],
+      generator: null, initialServerCount: 1, report });
+    const infra = new UnavailableInfra();
+    const collector = new Collector(config, infra, store, new InventoryReader(null), quiet);
+    const service = new ExperimentService(config, store, infra, collector, new FakeAdmin(), new InventoryReader(null), quiet);
+    await service.init();
+    service.stop();
+    expect((await store.getExperiment('exp_old'))?.report?.measured.scaleIn).toMatchObject({ status: 'unavailable', note: expect.stringMatching(/restarted/) });
   });
 });
 
@@ -193,6 +345,8 @@ describe('ExperimentService with the waiting room', () => {
     const e = await service.create(sale(), 'me');
     await until(() => service.experiment?.state === 'ready');
     expect(admin.prepared[0].settings.waiting_room_required).toBe(true);
+    // Preset F: 10-second holds for the last 200 tickets.
+    expect(admin.prepared[0].settings).toMatchObject({ reservation_ttl_seconds: 30, reservation_ttl_near_sellout_seconds: 10, near_sellout_threshold: 200 });
     // Preset F runs adaptive admission: 25 is each new server's starting limit, learned up to 200.
     expect(room.configs[0]).toEqual({ enabled: true, eventId: 'evt-1', activeUsersPerServer: 25, admissionTtlSeconds: 60, soldOutGraceSeconds: 35,
       admissionMode: 'adaptive', adaptive: { maxPerServer: 200 } });

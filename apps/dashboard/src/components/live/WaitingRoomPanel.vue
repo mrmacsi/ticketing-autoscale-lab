@@ -116,6 +116,7 @@ const rows = computed(() =>
       <Stat label="Wait p95" :value="fmtMs(r?.waitMs.p95)" testid="wr-wait-p95" :hint="r ? `max ${fmtMs(r.waitMs.max)}` : undefined" />
       <Stat label="Joined / admitted" :value="r ? `${fmtNumber(r.joinedTotal)} / ${fmtNumber(r.admittedTotal)}` : 'N/A'" testid="wr-totals" :hint="r ? `${fmtNumber(r.releasedTotal)} released · ${fmtNumber(r.expiredTotal)} expired` : undefined" />
       <Stat label="Told sold out" :value="fmtNumber(r?.soldOutTotal)" testid="wr-sold-out-total" hint="never reached a server" />
+      <Stat label="Queue store" :value="r?.store ? (r.store === 'redis' ? 'Redis (shared)' : 'memory (1 server)') : 'N/A'" testid="wr-store" :hint="r?.leaderInstance ? `leader ${r.leaderInstance}` : undefined" />
       <Stat label="Left the line" :value="r?.abandonedTotal == null ? 'N/A' : fmtNumber(r.abandonedTotal)" testid="wr-abandoned" hint="stopped checking in for 45 s" />
     </div>
     <div v-if="r && adaptive" :class="['space-y-1', stale ? 'opacity-70' : '']" data-testid="wr-servers">

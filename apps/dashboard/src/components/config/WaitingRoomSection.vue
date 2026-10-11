@@ -30,7 +30,7 @@ const MODE_HELP = {
 };
 const PER_SERVER_HELP = {
   fixed:
-    'How many admitted customers may be in checkout at once for each healthy server. Capacity = healthy servers × this value; 25 keeps one n1-standard-1 busy enough to scale without starving its health check.',
+    'How many admitted customers may be in checkout at once for each healthy server. Capacity = healthy servers × this value; 25 was measured to keep one n1-standard-1 busy enough to scale without starving its health check, so it is a conservative value for the n2-standard-2 servers.',
   adaptive:
     'How many admitted customers a server may have in checkout when it first turns healthy. From there the queue raises the limit while the server has headroom and cuts it as soon as the server is overloaded.',
 };

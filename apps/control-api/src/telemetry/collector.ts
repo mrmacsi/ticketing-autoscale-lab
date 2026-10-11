@@ -52,6 +52,8 @@ export class Collector {
   private unwatchTraffic: (() => void) | null = null;
   private generator: GeneratorStatus | null = null;
   private rejectedTotal = 0;
+  /** Id of a completed experiment whose instance group is still being watched for scale-in (see observeScaleIn). */
+  private scaleInFor: string | null = null;
 
   private pending = emptyAppend();
   private unflushed = emptyAppend();
@@ -106,6 +108,7 @@ export class Collector {
     this.lastBucketAt = null;
     this.inventory = null;
     this.rejectedTotal = 0;
+    this.scaleInFor = null;
     this.pending = emptyAppend();
     if (experiment) {
       this.unwatchTraffic = this.store.watchTrafficBuckets(experiment.id, (b) => this.onBucket(b),
@@ -117,10 +120,20 @@ export class Collector {
 
   private get recording() { return this.experiment !== null && ACTIVE_STATES.includes(this.experiment.state); }
 
-  async recordEvent(event: TimelineEvent) {
-    if (!this.experiment) return;
-    try { await this.store.addEvent(this.experiment.id, event); } catch (e) { this.log.warn({ err: String(e) }, 'event persist failed'); }
-    for (const l of this.listeners) l.timeline(event);
+  /**
+   * After completion, keep recording the instance group for the (completed) current experiment: scaling points and
+   * the detector's scaling / instance / health events from real MIG observations, marked `data.afterCompletion`.
+   * Ends with observeScaleIn(false) or when the experiment changes.
+   */
+  observeScaleIn(on: boolean) { this.scaleInFor = on ? this.experiment?.id ?? null : null; }
+
+  get observingScaleIn() { return this.scaleInFor !== null && this.scaleInFor === this.experiment?.id; }
+
+  /** Persists an event on the given experiment (default: the current one); only the current one's events are streamed. */
+  async recordEvent(event: TimelineEvent, experimentId = this.experiment?.id) {
+    if (!experimentId) return;
+    try { await this.store.addEvent(experimentId, event); } catch (e) { this.log.warn({ err: String(e) }, 'event persist failed'); }
+    if (experimentId === this.experiment?.id) for (const l of this.listeners) l.timeline(event);
   }
 
   private async recordEvents(events: TimelineEvent[]) {
@@ -141,14 +154,21 @@ export class Collector {
     }
     const view = this.migView()!;
     const instances = this.instanceViews();
-    if (this.recording) {
+    const afterCompletion = !this.recording && this.observingScaleIn;
+    if (this.recording || afterCompletion) {
       const point: ScalingPoint = {
         t: this.mig.at, actual: view.actualCount, running: view.runningCount, healthy: view.healthyCount,
         target: view.targetSize, min: view.autoscaler.minReplicas, max: view.autoscaler.maxReplicas,
       };
       this.pending.scaling.push(point);
       this.unflushed.scaling.push(point);
-      await this.recordEvents(this.detector.observeMig(view, instances));
+      const events = this.detector.observeMig(view, instances);
+      if (!afterCompletion) {
+        await this.recordEvents(events);
+      } else {
+        const id = this.scaleInFor!;
+        for (const e of events) await this.recordEvent({ ...e, data: { ...(e.data ?? {}), afterCompletion: true } }, id);
+      }
     }
   }
 

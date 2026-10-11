@@ -80,6 +80,13 @@ export interface ExperimentConfig {
   tickets: {
     eventName: string; totalInventory: number; categoryCount: number; pricesCents: number[];
     reservationTtlSeconds: number; paymentDelayMinMs: number; paymentDelayMaxMs: number; paymentFailureProbability: number;
+    /**
+     * Shorter hold for the last `nearSelloutThreshold` tickets (0 = off, else 5..3600 and ≤ reservationTtlSeconds), so
+     * abandoned checkouts near the end return them faster. Absent from configs stored before it existed (⇒ 0 / off).
+     */
+    nearSelloutTtlSeconds: number;
+    /** Remaining-ticket count at or below which nearSelloutTtlSeconds applies (0..1,000,000; 0 = off). */
+    nearSelloutThreshold: number;
   };
   traffic: TrafficSettings;
   syntheticCpuMaxMs: number;
@@ -199,6 +206,9 @@ export interface WaitingRoomStats {
   joinedTotal: number; admittedTotal: number; releasedTotal: number; expiredTotal: number; soldOutTotal: number;
   /** Dropped from the line for not checking in (closed the page); null from an older queue. */
   abandonedTotal: number | null;
+  /** Where the line lives and which queue server currently admits customers (null from an older queue). */
+  store: 'memory' | 'redis' | null;
+  leaderInstance: string | null;
   admissionRatePerSecond: number;
   waitMs: { p50: number | null; p95: number | null; max: number | null; count: number };
   oldestWaitingSeconds: number | null;
@@ -286,6 +296,29 @@ export interface WaitingRoomAdaptiveReport {
   decreasesTotal: number;
 }
 
+/**
+ * 'complete': back at servers.min with no VM being deleted; 'timed_out': still above it 15 min after completion;
+ * 'not_needed': never above servers.min; 'unavailable': no instance-group observations (local mode, or the control plane
+ * restarted while observing); 'superseded': a new experiment or a lab reset ended the observation first.
+ */
+export type ScaleInStatus = 'complete' | 'timed_out' | 'not_needed' | 'unavailable' | 'superseded';
+
+export interface ScaleInReport {
+  status: ScaleInStatus;
+  /** Observation time (Compute API) at which the group was first back at the minimum for good; null unless complete. */
+  completedAt: string | null;
+  /** completedAt − trafficStoppedAt; null unless complete (or no traffic stop recorded). */
+  secondsAfterTrafficStopped: number | null;
+  /** Highest observed server count − last observed count; null when never observed. */
+  serversRemoved: number | null;
+  /** When the observation ended. */
+  observedUntil: string;
+  /** The experiment's servers.min the group was expected to return to. */
+  targetServers: number;
+  /** Why the observation ended early / was unavailable. */
+  note?: string;
+}
+
 export interface Report {
   experimentId: string; name: string; generatedAt: string; state: string;
   config: ExperimentConfig;
@@ -306,6 +339,11 @@ export interface Report {
     requestsPerInstance: Record<string, number>;
     /** null when the waiting room was disabled for this experiment. */
     waitingRoom: WaitingRoomReport | null;
+    /**
+     * Scale-in after traffic stopped, observed on the instance group (also after completion, up to 15 min).
+     * null while it is still being observed (and in reports written before it existed).
+     */
+    scaleIn?: ScaleInReport | null;
   };
   configured: { cpuTarget: number; minReplicas: number; maxReplicas: number; initialServers: number; pattern: string; durationSeconds: number };
   estimated: { infrastructureCostUsd: number; note: string };

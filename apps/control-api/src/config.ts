@@ -25,6 +25,8 @@ export interface AppConfig {
   pricing: Record<string, number>;
   appMachineType: string;
   generatorMachineType: string;
+  /** Waiting-room queue VMs (only billed when the waiting room is deployed). */
+  queueMachineType: string;
   dbTier: string;
   intervals: { migMs: number; lbMs: number; cpuMs: number; instanceInfoMs: number; inventoryMs: number; waitingRoomMs: number; tickMs: number };
 }
@@ -116,19 +118,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       vusAbove: num('EXPENSIVE_VUS_ABOVE', 1000),
       instancesAbove: num('EXPENSIVE_INSTANCES_ABOVE', approvedMaxInstances),
     },
+    // europe-west2 on-demand list-price ESTIMATES (USD/hour); override per resource with PRICE_* env vars.
     pricing: {
-      appVmPerHour: num('PRICE_APP_VM_PER_HOUR', 0.0612),
+      appVmPerHour: num('PRICE_APP_VM_PER_HOUR', 0.113),               // n2-standard-2
       appDiskPerHour: num('PRICE_APP_DISK_PER_HOUR', 0.0022),
-      generatorVmPerHour: num('PRICE_GENERATOR_VM_PER_HOUR', 0.0218),
+      generatorVmPerHour: num('PRICE_GENERATOR_VM_PER_HOUR', 0.078),   // e2-standard-2
       generatorIpPerHour: num('PRICE_EXTERNAL_IP_PER_HOUR', 0.005),
       cloudSqlPerHour: num('PRICE_CLOUD_SQL_PER_HOUR', 0.084),
       loadBalancerPerHour: num('PRICE_LB_RULE_PER_HOUR', 0.03),
       lbIpPerHour: num('PRICE_LB_IP_PER_HOUR', 0.005),
       cloudRunPerHour: num('PRICE_CLOUD_RUN_PER_HOUR', 0.068),
       miscPerHour: num('PRICE_MISC_PER_HOUR', 0.01),
+      // Waiting room (only counted when WAITING_ROOM_URL is set): queue VMs + Memorystore Redis basic 1 GB.
+      queueVmPerHour: num('PRICE_QUEUE_VM_PER_HOUR', 0.0195),          // e2-small, each
+      queueVms: num('PRICE_QUEUE_VMS', 2),
+      redisPerHour: num('PRICE_REDIS_PER_HOUR', 0.058),
     },
-    appMachineType: str('APP_MACHINE_TYPE', 'n1-standard-1'),
-    generatorMachineType: str('GENERATOR_MACHINE_TYPE', 'e2-small'),
+    appMachineType: str('APP_MACHINE_TYPE', 'n2-standard-2'),
+    generatorMachineType: str('GENERATOR_MACHINE_TYPE', 'e2-standard-2'),
+    queueMachineType: str('QUEUE_MACHINE_TYPE', 'e2-small'),
     dbTier: str('DB_TIER', 'db-custom-1-3840'),
     intervals: {
       migMs: num('POLL_MIG_MS', 5000),
