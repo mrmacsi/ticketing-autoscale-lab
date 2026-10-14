@@ -1,6 +1,6 @@
 # Copy to terraform.tfvars. No secrets belong in this file.
-project_id     = "contentpulse-vertex-ai"
-project_number = "210564622269"
+project_id     = "your-project-id"
+project_number = "123456789012"
 region         = "europe-west2"
 zone           = "europe-west2-b"
 
@@ -17,7 +17,7 @@ scale_in_stabilization = 240
 generator_machine_type = "e2-standard-2"
 db_tier                = "db-custom-1-3840"
 
-allowed_emails = ["thebeezindex@gmail.com"]
+allowed_emails = ["you@example.com"]
 auth_mode      = "iam_proxy"
 
 # Optional budget alert (notification only, not a cap). Amount is in the billing account currency.
